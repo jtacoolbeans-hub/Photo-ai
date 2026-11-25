@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.9.2';
+const APP_VERSION = '1.11.0';
 const MIN_WORKER_VERSION = 5;
 const RECOMMENDED_WORKER_VERSION = 7; // 7 = tries several Cloudflare voice models, skips retired ones
 
@@ -47,7 +47,7 @@ const OLD_ANYTHING_V3 =
   'A: <your reply to be spoken aloud: one to three short sentences, plain words only, no lists, symbols or markdown>\n' +
   'Always give your best reply, even if the print is small or slightly unclear. ' +
   'Reply with just the word NONE only if nothing on the card can be read at all.';
-const MULTI_FORMAT =
+const OLD_MULTI_V4 =
   'If the card or page has several questions or items, handle EVERY one, in order from top to bottom.\n' +
   'Reply in exactly this format and nothing else, one pair per item (just Q1/A1 if there is only one):\n' +
   'Q1: <item 1, in at most 12 words>\n' +
@@ -55,6 +55,23 @@ const MULTI_FORMAT =
   'Q2: <item 2>\nA2: <reply to item 2>\n(and so on)\n' +
   'Always give your best reply, even if the print is small or slightly unclear. ' +
   'Reply with just the word NONE only if nothing on the card can be read at all.';
+const OLD_ANYTHING_V4 =
+  "The photo shows a card or page held up during a live show. Your reply is spoken into the performer's earbud, so it must be quick and natural.\n" +
+  'Whatever is written — a question, a word, a name, a topic, a statement, a number, a prompt or an instruction — respond to it directly ' +
+  'and helpfully, like a quick-witted friend. If it asks something, answer it. If it is a topic, name or word, say something short, ' +
+  'interesting or funny about it. If it is an instruction, carry it out.\n' + OLD_MULTI_V4;
+const OLD_QUESTION_V4 =
+  'The photo shows a paper card or page with printed questions. A stage performer will hear your answers through an earbud.\n' +
+  'Answer each question correctly and briefly.\n' + OLD_MULTI_V4;
+const MULTI_FORMAT =
+  'If the card or page has several questions or items, handle EVERY one, in order from top to bottom.\n' +
+  'Reply in exactly this format and nothing else, one pair per item (just Q1/A1 if there is only one):\n' +
+  'Q1: <item 1, in at most 12 words>\n' +
+  'A1: <your reply to item 1: one to three short sentences to be spoken aloud, plain words only, no lists, symbols or markdown>\n' +
+  'Q2: <item 2>\nA2: <reply to item 2>\n(and so on)\n' +
+  'Always give your best reply, even if the print is small or slightly unclear. ' +
+  'Reply with just the word NONE if nothing on the card can be read, OR if the photo does not show a card or page at all ' +
+  '(for example it shows a room, a TV screen, a person or an object): never describe or comment on what else is in the picture.';
 const PROMPT_ANYTHING =
   "The photo shows a card or page held up during a live show. Your reply is spoken into the performer's earbud, so it must be quick and natural.\n" +
   'Whatever is written — a question, a word, a name, a topic, a statement, a number, a prompt or an instruction — respond to it directly ' +
@@ -87,14 +104,15 @@ const DEFAULTS = {
   btnSingle: 'toggle', btnDouble: 'capture', btnTriple: 'repeat', autoArm: false, keyboard: true, gamepad: true, binds: {}, sayReady: true,
   camId: '', res: '1920x1440', camFps: 15, zoom: null, torch: false,
   useCrop: true, crop: { x: 0.1, y: 0.15, w: 0.8, h: 0.7 },
-  motionThresh: 4, sharpMin: 60, changeThresh: 10, cooldownSec: 4,
+  motionThresh: 4, sharpMin: 20, changeThresh: 10, cooldownSec: 4,
+  pageDetect: 'broad', minPagePct: 2, focusWaitSec: 2, emptyRef: null,
   idleFps: 1, ...PRESETS.fast,
 };
 for (const k of CUE_KEYS) DEFAULTS['cue_' + k] = 'tone';
 
 // ---------------------------------------------------------------- settings
 const LS_KEY = 'cardAssistant.settings.v1';
-const SETTINGS_VER = 8;
+const SETTINGS_VER = 10;
 let S = loadSettings();
 function loadSettings() {
   let saved = {};
@@ -106,8 +124,9 @@ function loadSettings() {
       const old = { thinking: '', res: 'max', stillFrames: 3, windowFrames: 4, watchFps: 3, activeFps: 8 };
       for (const k in old) if (saved[k] === old[k]) delete saved[k];
     }
-    if ([OLD_PROMPT_V1, OLD_QUESTION_V2, OLD_ANYTHING_V3].includes(saved.prompt)) delete saved.prompt;
+    if ([OLD_PROMPT_V1, OLD_QUESTION_V2, OLD_ANYTHING_V3, OLD_ANYTHING_V4, OLD_QUESTION_V4].includes(saved.prompt)) delete saved.prompt;
     if ((saved.v || 1) < 4 && saved.maxTokens === 1024) delete saved.maxTokens; // longer pages need room for many answers
+    if ((saved.v || 1) < 10 && saved.sharpMin === 60) delete saved.sharpMin; // now a 'focus target', not a gate: pages with little text must still count
     if ((saved.v || 1) < 8) { // Cloudflare retired MeloTTS: move to Aura, whose speaker names differ
       if (!saved.cfModel || /melotts/i.test(saved.cfModel)) delete saved.cfModel;
       if (saved.cfVoice === 'angus') delete saved.cfVoice;
@@ -268,18 +287,45 @@ function speak(text) {
   text = cleanSpeech(text);
   if (!text) return Promise.resolve();
   if (netVoice()) {
-    // Cloudflare voice: start making it NOW (several at once is fine). Gemini voice: one at a time (3 a minute free).
+    // Long text is cut into short pieces (a whole paragraph in one request is slow and often times out).
+    // Cloudflare voice: every piece is requested NOW, all at once, and played in order: the first piece starts
+    // as soon as it is ready while the rest are still being made. Gemini voice: one at a time (3 a minute free).
+    const pieces = voiceChunks(text);
     const first = voiceOrder()[0];
-    const job = first === 'cf' ? voiceJob(text, { engine: 'cf' }) : null;
+    const jobs = first === 'cf' ? pieces.map((c) => voiceJob(c, { engine: 'cf' })) : [];
     speechChain = speechChain.then(async () => {
       speaking = true; setSub();
-      try { await playVoice(text, job); } finally { speaking = false; setSub(); }
+      try { for (let i = 0; i < pieces.length; i++) await playVoice(pieces[i], jobs[i], i < pieces.length - 1); }
+      finally { speaking = false; setSub(); }
     });
     return speechChain;
   }
   const chunks = splitSpeech(text);
   speechChain = speechChain.then(async () => { holdLoop(); try { for (const ch of chunks) await speakDeviceNow(ch); } finally { releaseLoop(); } });
   return speechChain;
+}
+// Cut text into pieces at sentence ends: a short first piece (so sound starts quickly), longer ones after.
+function voiceChunks(text, firstMax = 110, restMax = 200) {
+  text = cleanSpeech(text);
+  const sents = text.replace(/([.!?])\s+/g, '$1\u0001').split('\u0001').map((x) => x.trim()).filter(Boolean);
+  const out = [];
+  let cur = '';
+  const max = () => (out.length ? restMax : firstMax);
+  for (let sent of sents) {
+    while (sent.length > max()) { // one very long sentence: cut at a comma, semicolon or space
+      const lim = max();
+      let cut = Math.max(sent.lastIndexOf(', ', lim), sent.lastIndexOf('; ', lim), sent.lastIndexOf(' ', lim));
+      if (cut < 25) cut = lim;
+      if (cur) { out.push(cur); cur = ''; }
+      out.push(sent.slice(0, cut + 1).trim()); sent = sent.slice(cut + 1).trim();
+    }
+    if (!sent) continue;
+    if (!cur) cur = sent;
+    else if ((cur + ' ' + sent).length <= max()) cur += ' ' + sent;
+    else { out.push(cur); cur = sent; }
+  }
+  if (cur) out.push(cur);
+  return out.length ? out : [text];
 }
 function splitSpeech(text) {
   const parts = text.replace(/([.!?])\s+/g, '$1\u0001').split('\u0001'); // split at sentence ends, not inside "7.21"
@@ -399,14 +445,14 @@ function friendlyError(m) {
   return m.length > 160 ? m.slice(0, 157) + '…' : m;
 }
 // Say one line with the first voice that works; skip a voice for the rest of the session if it is out of quota.
-async function playVoice(text, firstJob) {
+async function playVoice(text, firstJob, more = false) {
   const errs = [];
   for (const eng of voiceOrder()) {
-    const tries = eng === 'gemini' ? [{ stream: true }, { stream: false }] : [{}];
+    const tries = eng === 'gemini' ? [{ stream: true }, { stream: false }] : [{}, { retry: true }]; // Cloudflare: one more go if a piece times out
     for (const t of tries) {
-      const job = (firstJob && firstJob.engine === eng && t.stream !== false) ? firstJob : voiceJob(text, { engine: eng, ...t });
+      const job = (firstJob && !firstJob.failed && firstJob.engine === eng && t.stream !== false && !t.retry) ? firstJob : voiceJob(text, { engine: eng, ...t });
       try {
-        await playJob(job);
+        await playJob(job, more);
         if (/^Voice/.test(speechNote)) speechNote = '';
         return;
         engineFails[eng] = 0;
@@ -440,7 +486,7 @@ function voiceJob(text, opts = {}) {
   voiceJobs.set(key, job);
   if (voiceJobs.size > 80) voiceJobs.delete(voiceJobs.keys().next().value);
   (async () => {
-    const ctrl = new AbortController(), tm = setTimeout(() => ctrl.abort(), 25000);
+    const ctrl = new AbortController(), tm = setTimeout(() => ctrl.abort(), engine === 'cf' ? 15000 : 25000);
     try {
       const r = await fetch(S.workerUrl.trim().replace(/\/$/, ''), {
         method: 'POST', signal: ctrl.signal,
@@ -494,7 +540,8 @@ async function ensureAudioRunning() {
   return c;
 }
 // Play a voice as its pieces arrive, gap-free. Resolves after the last piece has played.
-async function playJob(job) {
+let voiceClock = 0; // when the previous piece of audio ends, so the next piece starts exactly then
+async function playJob(job, more = false) {
   const c = await ensureAudioRunning();
   let i = 0, t = 0, any = false;
   for (;;) {
@@ -503,7 +550,7 @@ async function playJob(job) {
       const b = c.createBuffer(1, ch.data.length, ch.rate);
       b.getChannelData(0).set(ch.data);
       const src = c.createBufferSource(); src.buffer = b; src.connect(c.destination);
-      if (!any || t < c.currentTime + 0.01) t = c.currentTime + (any ? 0.01 : 0.05);
+      if (!any) t = Math.max(c.currentTime + 0.05, voiceClock); else if (t < c.currentTime + 0.01) t = c.currentTime + 0.01;
       src.start(t); t += b.duration;
       if (!any) sev('voice "' + job.text.slice(0, 24) + '" — ' + (job.mode || '?') + (job.model ? ' [' + job.model.split('/').pop() + ']' : '') + ', first sound after ' + job.firstMs + ' ms');
       any = true;
@@ -512,8 +559,10 @@ async function playJob(job) {
     await job.wait();
   }
   if (!any) throw job.failed || new Error('no audio');
+  voiceClock = t;
   const left = t - c.currentTime;
-  if (left > 0) await sleep(left * 1000 + 60);
+  // if another piece follows, come back a moment BEFORE this one ends, so the next one is already queued
+  if (left > 0) await sleep(more ? Math.max(0, left * 1000 - 250) : left * 1000 + 60);
 }
 function prewarmVoice() { // make the lines we know in advance, so they play instantly
   if (!netVoice()) return;
@@ -812,12 +861,159 @@ function greyOf(ctx, w, h) {
   for (let i = 0, j = 0; j < g.length; i += 4, j++) g[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
   return g;
 }
+// ---------------------------------------------------------------- page detection
+// Runs on the phone, on the small picture used for motion, so it costs no Gemini calls. It asks "is there a
+// page / card in view?" without looking at text, so blurry pages, nearly blank pages and small index cards count.
+const PAGE_PRESETS = {
+  broad:  { minFill: 0.45, minContrast: 22, maxSat: 0.70, paleMean: 95, edgeDiv: 20, minL: 55 },
+  strict: { minFill: 0.70, minContrast: 45, maxSat: 0.40, paleMean: 130, edgeDiv: 10, minL: 80 },
+};
+let lastPage = { present: true, frac: 0, bbox: null, reason: '', method: '' };
+let lastRGBA = null, learnEmpty = null, refCache = { key: '', ref: null };
+
+function otsuThreshold(hist, n) {
+  let sumAll = 0; for (let i = 0; i < 256; i++) sumAll += i * hist[i];
+  let wB = 0, sumB = 0, best = -1, thr = 128;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t]; if (!wB) continue;
+    const wF = n - wB; if (!wF) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB, mF = (sumAll - sumB) / wF, v = wB * wF * (mB - mF) * (mB - mF);
+    if (v > best) { best = v; thr = t; }
+  }
+  return thr;
+}
+// Largest connected blob of "on" pixels in a mask (4-connected). Returns area, bounding box, member list.
+function largestBlob(mask, w, h, sat) {
+  const n = w * h, seen = new Uint8Array(n), stack = new Int32Array(n), order = new Int32Array(n);
+  let ptr = 0, best = null;
+  for (let s0 = 0; s0 < n; s0++) {
+    if (!mask[s0] || seen[s0]) continue;
+    const start = ptr; let sp = 0, area = 0, sumSat = 0, x0 = w, y0 = h, x1 = -1, y1 = -1;
+    stack[sp++] = s0; seen[s0] = 1;
+    while (sp) {
+      const q = stack[--sp]; order[ptr++] = q; area++; sumSat += sat[q];
+      const x = q % w, y = (q / w) | 0;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      if (x > 0 && mask[q - 1] && !seen[q - 1]) { seen[q - 1] = 1; stack[sp++] = q - 1; }
+      if (x < w - 1 && mask[q + 1] && !seen[q + 1]) { seen[q + 1] = 1; stack[sp++] = q + 1; }
+      if (y > 0 && mask[q - w] && !seen[q - w]) { seen[q - w] = 1; stack[sp++] = q - w; }
+      if (y < h - 1 && mask[q + w] && !seen[q + w]) { seen[q + w] = 1; stack[sp++] = q + w; }
+    }
+    if (!best || area > best.area) best = { start, end: ptr, area, sumSat, x0, y0, x1, y1 };
+  }
+  return best ? { ...best, order } : null;
+}
+const normBox = (b, w, h) => ({ x0: b.x0 / w, y0: b.y0 / h, x1: (b.x1 + 1) / w, y1: (b.y1 + 1) / h });
+
+// data = RGBA pixels (w×h). P = preset. ref = saved picture of the empty view (or null). minArea = smallest accepted
+// share of the picture (0–1). Returns { present, frac, bbox, reason, method }.
+function detectPage(data, w, h, P, ref, minArea) {
+  const n = w * h, L = new Uint8Array(n), sat = new Uint8Array(n), hist = new Uint32Array(256);
+  let sum = 0, sumSat = 0;
+  for (let i = 0, j = 0; j < n; i += 4, j++) {
+    const r = data[i], g = data[i + 1], b = data[i + 2], mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    const l = (0.299 * r + 0.587 * g + 0.114 * b) | 0;
+    L[j] = l; hist[l]++; sum += l;
+    const sv = mx ? ((mx - mn) * 255 / mx) | 0 : 0; sat[j] = sv; sumSat += sv;
+  }
+  const mean = sum / n, meanSat = sumSat / n / 255;
+  const pct = (q) => { let acc = 0; const t = Math.ceil(n * q); for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= t) return i; } return 255; };
+  // Wide percentiles on purpose: a small index card covers only a few percent of the picture, and must not vanish into "flat".
+  const p5 = pct(0.005), p10 = pct(0.10), p95 = pct(0.995);
+  const no = (reason, method = 'auto') => ({ present: false, frac: 0, bbox: null, reason, method });
+  // 1. a saved picture of the empty view: anything that differs from it is "something in the box"
+  if (ref && ref.L.length === n) {
+    const off = p10 - ref.p10, mask = new Uint8Array(n);
+    for (let i = 0; i < n; i++) mask[i] = Math.abs(L[i] - (ref.L[i] + off)) > 28 ? 1 : 0;
+    const blob = largestBlob(mask, w, h, sat), frac = blob ? blob.area / n : 0;
+    return frac >= minArea
+      ? { present: true, frac, bbox: normBox(blob, w, h), reason: 'differs from the empty view', method: 'empty view' }
+      : { present: false, frac, bbox: null, reason: 'matches the empty view', method: 'empty view' };
+  }
+  // 2. no empty view saved: look for a paper-like region (bright, plain, boxy, with a clear edge)
+  if (mean < 20 && p95 < 60) return no('too dark');
+  if (p95 - p5 < 28) { // flat picture: nothing stands out. A pale, plain picture is a blank page filling the view.
+    const pale = mean >= P.paleMean && meanSat <= P.maxSat;
+    return pale ? { present: true, frac: 1, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 }, reason: 'a pale page fills the view', method: 'auto' } : no('flat picture, no page');
+  }
+  const T = otsuThreshold(hist, n);
+  let nf = 0, sf = 0, nb = 0, sb = 0;
+  for (let i = 0; i < n; i++) { if (L[i] > T) { nf++; sf += L[i]; } else { nb++; sb += L[i]; } }
+  if (!nf || !nb) return no('flat picture, no page');
+  const contrast = sf / nf - sb / nb;
+  if (contrast < P.minContrast) return no('nothing clearly brighter than the background');
+  const mask = new Uint8Array(n); for (let i = 0; i < n; i++) mask[i] = L[i] > T ? 1 : 0;
+  const blob = largestBlob(mask, w, h, sat);
+  if (!blob) return no('no bright region');
+  const frac = blob.area / n, bw = blob.x1 - blob.x0 + 1, bh = blob.y1 - blob.y0 + 1, fill = blob.area / (bw * bh);
+  const avgSat = blob.sumSat / blob.area / 255;
+  let lsum = 0, gsum = 0, gcount = 0;
+  for (let k = blob.start; k < blob.end; k++) {
+    const q = blob.order[k]; lsum += L[q];
+    const x = q % w, y = (q / w) | 0;
+    if (x < 1 || y < 1 || x > w - 2 || y > h - 2) continue;
+    if (mask[q - 1] && mask[q + 1] && mask[q - w] && mask[q + w]) continue; // not on the edge of the region
+    const gx = (L[q + 1] - L[q - 1]) / 2, gy = (L[q + w] - L[q - w]) / 2;
+    gsum += Math.sqrt(gx * gx + gy * gy); gcount++;
+  }
+  const meanL = lsum / blob.area, edge = gcount ? gsum / gcount : Infinity;
+  const base = { frac, bbox: normBox(blob, w, h), method: 'auto' };
+  if (frac < minArea) return { ...base, present: false, reason: 'bright region is too small (' + (frac * 100).toFixed(1) + '%)' };
+  if (fill < P.minFill) return { ...base, present: false, reason: 'bright region is not boxy' };
+  if (avgSat > P.maxSat) return { ...base, present: false, reason: 'too colourful to be paper' };
+  if (meanL < P.minL) return { ...base, present: false, reason: 'region is too dim' };
+  if (edge < contrast / P.edgeDiv) return { ...base, present: false, reason: 'soft glow, no clear edge' };
+  return { ...base, present: true, reason: 'paper-like region' };
+}
+function pageSig(w, h) {
+  const c = S.useCrop ? [S.crop.x, S.crop.y, S.crop.w, S.crop.h].map((v) => v.toFixed(3)).join(',') : 'full';
+  return c + '|' + video.videoWidth + 'x' + video.videoHeight + '|' + w + 'x' + h;
+}
+function emptyRefFor(w, h) {
+  const r = S.emptyRef;
+  if (!r || r.sig !== pageSig(w, h) || r.w !== w || r.h !== h) return null;
+  if (refCache.key !== r.b64) { try { const bin = atob(r.b64), L = new Uint8Array(bin.length); for (let i = 0; i < L.length; i++) L[i] = bin.charCodeAt(i); refCache = { key: r.b64, ref: { L, p10: r.p10 } }; } catch { return null; } }
+  return refCache.ref;
+}
+function detectCurrent() {
+  if (S.pageDetect === 'off' || !lastRGBA) return (lastPage = { present: true, frac: 0, bbox: null, reason: 'page detection is off', method: 'off' });
+  const P = PAGE_PRESETS[S.pageDetect] || PAGE_PRESETS.broad;
+  const minArea = Math.max(0.2, +S.minPagePct || 2, S.pageDetect === 'strict' ? 6 : 0) / 100;
+  lastPage = detectPage(lastRGBA.data, lastRGBA.w, lastRGBA.h, P, emptyRefFor(lastRGBA.w, lastRGBA.h), minArea);
+  return lastPage;
+}
+// "Learn empty view": averages a few pictures of the empty box and remembers them.
+function startLearnEmpty() { learnEmpty = { left: 6, acc: null }; $('emptyInfo').textContent = 'Learning… keep the box empty and still.'; }
+function feedLearnEmpty(g, w, h) {
+  if (!learnEmpty) return;
+  if (!learnEmpty.acc) learnEmpty.acc = new Float32Array(w * h);
+  for (let i = 0; i < g.length; i++) learnEmpty.acc[i] += g[i];
+  if (--learnEmpty.left > 0) return;
+  const L = new Uint8Array(w * h), hist = new Uint32Array(256);
+  for (let i = 0; i < L.length; i++) { L[i] = Math.round(learnEmpty.acc[i] / 6); hist[L[i]]++; }
+  let acc = 0, p10 = 0; for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= L.length * 0.1) { p10 = i; break; } }
+  let b64 = ''; for (let i = 0; i < L.length; i += 4096) b64 += String.fromCharCode.apply(null, L.subarray(i, i + 4096));
+  S.emptyRef = { sig: pageSig(w, h), w, h, p10, b64: btoa(b64), at: Date.now() };
+  saveSettings(); learnEmpty = null; refCache = { key: '', ref: null }; updateEmptyInfo();
+}
+function updateEmptyInfo() {
+  const el = $('emptyInfo'); if (!el || learnEmpty) return;
+  const r = S.emptyRef;
+  if (!r) { el.textContent = 'No empty view saved: the app looks for a paper-like region by itself.'; return; }
+  const ok = lastRGBA && r.sig === pageSig(lastRGBA.w, lastRGBA.h);
+  el.textContent = 'Empty view saved ' + new Date(r.at).toLocaleTimeString() + (ok ? ' — in use (anything that differs counts as a page).' : ' — NOT in use: the crop box or camera changed, learn it again.');
+}
+
 // Motion: average brightness change per pixel (0–255) on a tiny 160px-wide copy.
 function measureMotion(r) {
   const w = 160, h = Math.max(8, Math.round(160 * r.sh / r.sw));
   if (anCanvas.width !== w || anCanvas.height !== h) { anCanvas.width = w; anCanvas.height = h; prevGrey = null; }
   anCtx.drawImage(video, r.sx, r.sy, r.sw, r.sh, 0, 0, w, h);
-  const g = greyOf(anCtx, w, h);
+  const img = anCtx.getImageData(0, 0, w, h), d = img.data, g = new Float32Array(w * h);
+  for (let i = 0, j = 0; j < g.length; i += 4, j++) g[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+  lastRGBA = { data: d, w, h };
+  feedLearnEmpty(g, w, h);
   let bright = 0; for (let i = 0; i < g.length; i++) bright += g[i];
   if (bright / g.length < 2) { if (!blackSince) blackSince = performance.now(); } else blackSince = 0;
   let m = 0;
@@ -855,7 +1051,7 @@ function thumbOf(canvas, max = 480) {
 // phase: 'idle' (disarmed) | 'watch' | 'collect' | 'busy' (thinking/speaking)
 let running = false, armed = false, phase = 'idle';
 let stillCount = 0, collect = null, needChange = false, nextAutoAt = 0, noneRetries = 0;
-let movedWhileBusy = false, skipNote = '', skipNoteAt = 0, readNote = '';
+let movedWhileBusy = false, skipNote = '', skipNoteAt = 0, readNote = '', softSince = 0, readCount = 0;
 let lastMotion = 0, lastSharp = 0, checks = 0, checksAt = performance.now(), fpsShown = 0;
 let last = { q: '', a: '', text: '' };
 let loopTimer = null;
@@ -870,6 +1066,7 @@ function setArmed(on) {
 }
 
 function currentFps() {
+  if (learnEmpty) return 8;
   if (phase === 'collect') return +S.activeFps || 8;
   if (!armed) return +S.idleFps || 1;
   if ((phase === 'watch' && (stillCount > 0 || lastMotion > S.motionThresh))) return +S.activeFps || 8;
@@ -892,10 +1089,12 @@ function tick() {
   const motion = measureMotion(r);
   lastMotion = motion; checks++;
   const still = motion < S.motionThresh;
-  if (motion > S.changeThresh) { needChange = false; if (phase === 'busy') movedWhileBusy = true; } // card moved / changed
+  const pg = detectCurrent(); // is there a page / card in view? (no Gemini call)
+  if (motion > S.changeThresh) { needChange = false; softSince = 0; if (phase === 'busy') movedWhileBusy = true; } // card moved / changed
 
   if (phase === 'watch') {
-    stillCount = still ? stillCount + 1 : 0;
+    stillCount = still && pg.present ? stillCount + 1 : 0; // nothing is read until a page is in view and still
+    if (!pg.present) softSince = 0;
     const allowed = !needChange && Date.now() >= nextAutoAt;
     if (allowed && stillCount >= S.stillFrames) {
       collect = { n: 0, best: -1, forced: false, source: 'auto', motion };
@@ -903,17 +1102,24 @@ function tick() {
     }
   }
   if (phase === 'collect') {
-    if (!collect.forced && !still) { phase = 'watch'; collect = null; stillCount = 0; }
+    if (!collect.forced && (!still || !pg.present)) { phase = 'watch'; collect = null; stillCount = 0; }
     else {
       const sh = measureSharpness(r); lastSharp = sh;
       if (sh > collect.best) { collect.best = sh; grabBest(r); }
       collect.n++;
       if (collect.n >= (collect.forced ? 3 : S.windowFrames)) {
         const c = collect; collect = null;
-        if (c.forced || c.best >= S.sharpMin) { phase = 'busy'; handleCapture(c); }
-        else { // blank or blurry: tell the display why, then wait for a change
-          skipNote = 'Not sent: sharpness ' + Math.round(c.best) + ' is below the minimum ' + S.sharpMin; skipNoteAt = Date.now();
-          phase = 'watch'; stillCount = 0; needChange = true;
+        if (c.forced || c.best >= S.sharpMin) { softSince = 0; phase = 'busy'; handleCapture(c); }
+        else {
+          // A page IS in view but it is soft (blurry, or very little writing on it). Give the camera a moment to focus,
+          // then send it anyway: a nearly blank card or a card with one word has few sharp edges but still counts.
+          const waited = softSince ? Date.now() - softSince : 0;
+          if (!softSince) softSince = Date.now();
+          if (waited >= (+S.focusWaitSec || 0) * 1000) { softSince = 0; c.soft = true; phase = 'busy'; handleCapture(c); }
+          else {
+            skipNote = 'Page found — waiting for focus (sharpness ' + Math.round(c.best) + ', target ' + S.sharpMin + ')'; skipNoteAt = Date.now();
+            phase = 'watch'; stillCount = S.stillFrames; // come straight back for another look
+          }
         }
       }
     }
@@ -978,7 +1184,9 @@ async function runCapture(c) {
     w: bestCanvas.width, h: bestCanvas.height, kb: Math.round(dataUrl.length * 0.75 / 1024),
     thumb: thumbOf(bestCanvas), cam: video.videoWidth + '×' + video.videoHeight,
     frameAge: Math.round(performance.now() - lastFrameAt),
+    pagePct: Math.round((lastPage.frac || 0) * 100), pageNote: lastPage.reason || '', soft: !!c.soft,
   };
+  readCount++;
   setState('thinking');
   const timeoutMs = ((+S.timeoutSec || 8) + (S.lateAnswer ? (+S.lateSec || 0) : 0)) * 1000;
   const pending = callWorker(dataUrl, timeoutMs); // send first, beep while it uploads
@@ -1011,7 +1219,7 @@ async function runCapture(c) {
     entry.status = stalled ? 'late-answer' : 'answer'; next = 'speak';
     entry.items = parsed.items.length;
     last = { q: parsed.q, a: parsed.a, items: parsed.items, text: res.text };
-    if (netVoice() && voiceOrder()[0] === 'cf') itemTexts(parsed.items).forEach((t) => voiceJob(t, { engine: 'cf' })); // start making the voice now
+    if (netVoice() && voiceOrder()[0] === 'cf') itemTexts(parsed.items).forEach((t) => voiceChunks(t).forEach((c) => voiceJob(c, { engine: 'cf' }))); // start making the voice now
   }
   logCapture(entry); // logged BEFORE speaking, so it is saved even if something interrupts the speech
   showLast(entry);
@@ -1129,13 +1337,14 @@ function setSub() {
   if (skipNote && Date.now() - skipNoteAt < 8000) bits.push(skipNote);
   if (needChange && armed && phase === 'watch') bits.push('waiting for card to change');
   if (speaking) bits.push('speaking');
+  if (armed && phase === 'watch' && !lastPage.present && !needChange && S.pageDetect !== 'off') bits.push('no page in view (' + lastPage.reason + ')');
   if (readNote) bits.push('⚠ ' + readNote);
   if (speechNote) bits.push('⚠ ' + speechNote);
   $('sub').textContent = bits.join(' · ');
 }
 function updateMeters(still) {
   const now = performance.now();
-  if (now - checksAt > 2000) { fpsShown = checks * 1000 / (now - checksAt); checks = 0; checksAt = now; }
+  if (now - checksAt > 2000) { fpsShown = checks * 1000 / (now - checksAt); checks = 0; checksAt = now; updateEmptyInfo(); }
   if (document.body.classList.contains('showmode')) return; // nothing to draw
   $('mMotion').textContent = lastMotion >= 255 ? '–' : lastMotion.toFixed(1);
   $('mMotion').style.color = still ? 'var(--ok)' : 'var(--fg)';
@@ -1145,6 +1354,15 @@ function updateMeters(still) {
   $('barSharp').style.width = Math.min(100, lastSharp / (S.sharpMin * 3 || 1) * 100) + '%';
   $('mStill').textContent = stillCount + '/' + S.stillFrames;
   $('mFps').textContent = fpsShown ? fpsShown.toFixed(1) : '–';
+  const pm = $('mPage'); pm.textContent = S.pageDetect === 'off' ? 'off' : lastPage.present ? '✓ ' + Math.round(lastPage.frac * 100) + '%' : '✕';
+  pm.style.color = S.pageDetect !== 'off' && lastPage.present ? 'var(--ok)' : 'var(--fg)';
+  const pb = $('pageBox'), bb = lastPage.present && S.pageDetect !== 'off' && lastPage.bbox;
+  if (bb && !(bb.x0 <= 0.001 && bb.y0 <= 0.001 && bb.x1 >= 0.999 && bb.y1 >= 0.999)) {
+    const c = S.useCrop ? S.crop : { x: 0, y: 0, w: 1, h: 1 };
+    pb.style.left = (c.x + bb.x0 * c.w) * 100 + '%'; pb.style.top = (c.y + bb.y0 * c.h) * 100 + '%';
+    pb.style.width = (bb.x1 - bb.x0) * c.w * 100 + '%'; pb.style.height = (bb.y1 - bb.y0) * c.h * 100 + '%'; pb.hidden = false;
+  } else pb.hidden = true;
+  $('readsInfo').textContent = 'Cards sent to Gemini this session: ' + readCount;
   renderState(); setSub();
 }
 let lastFull = null, readerPx = 28;
@@ -1213,6 +1431,8 @@ $('btnShow').onclick = () => setShowMode(true);
   });
 })();
 $('btnCam').onclick = () => restartCamera('manual');
+$('btnLearnEmpty').onclick = () => { if (!running) { $('emptyInfo').textContent = 'Tap START first, then learn the empty view.'; return; } startLearnEmpty(); };
+$('btnClearEmpty').onclick = () => { S.emptyRef = null; saveSettings(); refCache = { key: '', ref: null }; updateEmptyInfo(); };
 $('btnTestVoice').onclick = () => {
   audioCtx(); setAudioSession(); speechNote = '';
   speak('This is how answers will sound in your earbud.').then(updateSpeechInfo); updateSpeechInfo();

@@ -65,7 +65,7 @@
               border-radius:8px; padding:6px; font-size:13px; display:none; pointer-events:none; }
   #stage.drawing #drawHint { display:block; }
   #cropBox { position:absolute; border:2px solid #ffd60a; border-radius:4px; box-shadow:0 0 0 9999px rgba(0,0,0,.45); pointer-events:none; }
-  .meters { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin-top:8px; text-align:center; }
+  .meters { display:grid; grid-template-columns:repeat(5,1fr); gap:5px; margin-top:8px; text-align:center; }
   .meters > div { background:#000; border-radius:10px; padding:5px 2px 6px; }
   .meters b { display:block; font-size:16px; font-variant-numeric:tabular-nums; }
   .meters span { font-size:10px; color:#bbb; text-transform:uppercase; letter-spacing:.04em; }
@@ -96,6 +96,7 @@
   [hidden] { display:none !important; }
   #frozenShot { position:absolute; inset:0; width:100%; height:100%; z-index:1; }
   #cropBox { z-index:2; }
+  #pageBox { position:absolute; z-index:2; border:2px dashed #34c759; border-radius:3px; pointer-events:none; box-sizing:border-box; }
   #frozenTag { position:absolute; top:8px; left:50%; transform:translateX(-50%); z-index:3; background:rgba(0,40,80,.85);
                color:#cfe6ff; border-radius:8px; padding:5px 10px; font-size:13px; font-weight:600; white-space:nowrap; }
   button.pri { background:var(--acc); color:#000; }
@@ -136,6 +137,7 @@
     <div id="frozenTag" hidden></div>
     <div id="placeholder">Camera view appears here after you tap START</div>
     <div id="cropBox"></div>
+    <div id="pageBox" hidden></div>
     <div id="drawHint">Drag on the picture to draw the crop box</div>
   </div>
   <div id="camLost" hidden><b>Camera disconnected</b><span id="camLostWhy"></span>
@@ -145,9 +147,11 @@
     <div><b id="mMotion">–</b><span>motion</span><div class="bar"><i id="barMotion"></i></div></div>
     <div><b id="mSharp">–</b><span>sharp</span><div class="bar"><i id="barSharp"></i></div></div>
     <div><b id="mStill">–</b><span>still</span></div>
+    <div><b id="mPage">–</b><span>page</span></div>
     <div><b id="mFps">–</b><span>checks/s</span></div>
   </div>
   <div class="hint" id="camInfo"></div>
+  <div class="hint" id="readsInfo"></div>
 
   <div class="controls">
     <button id="btnStart" class="pri">▶ START<small>camera, sound, earbuds</small></button>
@@ -372,14 +376,28 @@
     <option value="careful">Careful — 3 still checks, sharpest of 4</option>
     <option value="custom">Custom (numbers below)</option>
   </select>
+  <label>Page detection — decides if there is a page in view, on the phone, so no Gemini calls are wasted</label>
+  <select data-k="pageDetect">
+    <option value="broad">Broad — blurry, nearly blank pages and small cards count (default)</option>
+    <option value="strict">Strict — only clear, large pages</option>
+    <option value="off">Off — anything still can be read</option>
+  </select>
+  <div class="hint">A dashed green outline on the camera view shows what it thinks the page is. The “page” meter shows ✓ and the page's share of the picture.</div>
+  <label>Smallest card to accept (% of the checked picture)</label>
+  <input type="number" data-k="minPagePct" min="0.5" max="60" step="0.5">
+  <label>Learn the empty view (most reliable for a fixed box)</label>
+  <div><button id="btnLearnEmpty">Learn empty view</button><button id="btnClearEmpty">Forget it</button></div>
+  <div class="hint" id="emptyInfo"></div>
   <label>Motion threshold — below this counts as “still”</label>
   <input type="number" data-k="motionThresh" min="0.5" max="40" step="0.5">
   <label>Still checks needed before capturing</label>
   <input type="number" data-k="stillFrames" min="1" max="20">
   <label>Frames to compare (the sharpest one is sent)</label>
   <input type="number" data-k="windowFrames" min="1" max="15">
-  <label>Minimum sharpness (blank box / blurry frames stay below this)</label>
+  <label>Focus target — a page sharper than this is read at once; a softer page waits for focus</label>
   <input type="number" data-k="sharpMin" min="0" max="5000" step="5">
+  <label>Wait this long for focus on a soft page (seconds), then send it anyway</label>
+  <input type="number" data-k="focusWaitSec" min="0" max="15" step="0.5">
   <label>After an answer, wait for the card to change (movement above this) before reading again</label>
   <input type="number" data-k="changeThresh" min="1" max="60" step="0.5">
   <label>Minimum seconds between automatic reads</label>

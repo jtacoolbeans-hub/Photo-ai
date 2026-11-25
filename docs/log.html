@@ -60,7 +60,7 @@ async function render() {
       '<div class="t">' + esc(d.toLocaleTimeString()) + ' · ' + esc(e.trigger) + ' · <b class="' + esc(e.status) + '">' + esc(e.status) + '</b></div>' +
       '<div class="t">' + ((e.latencyMs || 0) / 1000).toFixed(1) + ' s · sharp ' + esc(e.sharp) + ' · motion ' + esc(e.motion) +
       (e.w ? ' · ' + esc(e.w) + '×' + esc(e.h) + ' · ' + esc(e.kb) + ' KB' : '') + (e.model ? ' · ' + esc(e.model) : '') +
-      (e.cam ? ' · cam ' + esc(e.cam) + ', frame age ' + esc(e.frameAge) + ' ms' : '') + '</div>' +
+      (e.cam ? ' · cam ' + esc(e.cam) + ', frame age ' + esc(e.frameAge) + ' ms' : '') + (e.pagePct != null ? ' · page ' + esc(e.pagePct) + '%' : '') + (e.soft ? ' · soft, sent after focus wait' : '') + '</div>' +
       '<div class="r">' + esc(e.reply || e.error || '') + '</div></div></div>';
   }
   list.innerHTML = html;

@@ -175,6 +175,26 @@ quota, no extra key. Gemini's voice is kept as the backup. One-time setup on you
 If a voice runs out of its free allowance, the app stops asking it for the rest of the session and uses the
 other one; the status line shows a short message such as "Gemini free daily limit reached — resets in 11 h 47 m".
 
+### Page detection (saves your Gemini calls)
+
+Nothing is sent to Gemini unless a page or card is actually in view. The check runs **on the phone** (it
+takes under a millisecond and costs nothing): it looks for a bright, plain, boxy region that stands out from the
+background and has a clear edge. It does not look at text, so **blurry pages, nearly blank pages and small
+index cards all count**. A dim room, a plain wall, a glow, or a colourful TV do not.
+
+- The **page** meter under the camera view shows ✓ and the page's share of the picture (✕ if none), and a **dashed
+  green outline** shows what it thinks the page is. The status line says why when it sees none, and
+  "Cards sent to Gemini this session" counts what you have spent.
+- **Detection → Page detection**: *Broad* (default), *Strict* (only large, clear pages) or *Off*.
+  **Smallest card to accept** is a percentage of the checked picture (default 2%).
+- **Learn empty view** (most reliable for a fixed box): with the box empty, tap it once. From then on anything that
+  differs from the empty box counts as a page, whatever its colour, size or sharpness. Learn it again if you
+  move the crop box or change the camera resolution.
+- A page that is in view but soft is **not** rejected: it waits up to **2 seconds** for focus (**Focus target / Wait
+  for focus**), then is sent anyway. (Before, a card with just one word on it could be skipped for having too few
+  sharp edges.)
+- A capture you ask for yourself (double press, the button, **C**) is always sent.
+
 ### Cloudflare retires voice models (Worker version 7)
 
 Cloudflare switches old Workers AI models off from time to time (MeloTTS stopped working on 2026-11-20). The

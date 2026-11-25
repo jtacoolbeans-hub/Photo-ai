@@ -31,6 +31,8 @@ in the real venue lighting before the first show.
 - [ ] Put the phone in the box. Place a practice card where the real cards will go.
 - [ ] Check the camera view shows the card sharply. Tap **Draw crop box** and drag a box around the
       card area with a little margin, then tap **Done drawing**.
+- [ ] With the box **empty**, open **Detection** and tap **Learn empty view**. Check the **page** meter shows ✕ when
+      the box is empty and ✓ with a green outline when a card is in place (try your smallest card).
 - [ ] Watch the meters:
   - **motion** should drop below the motion threshold (it turns green) when nothing is moving.
   - **sharpness** with a card in place should be well above **Minimum sharpness** (green). With
