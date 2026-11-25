@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.14.0';
+const APP_VERSION = '1.14.1';
 const MIN_WORKER_VERSION = 5;
 const RECOMMENDED_WORKER_VERSION = 8; // 8 = Deepgram voice, Gemini model list, cheapest Cloudflare voice first
 
@@ -297,6 +297,7 @@ const LAB_VARIANTS = [
   { id: 4, loop: 'pause', wa: 'quiet', session: 'playback',       label: 'background sound OFF, beeps asleep' },
   { id: 5, loop: 'play',  wa: 'run',   session: 'transient-solo', label: 'background sound ON, "speech-prompt" audio mode' },
   { id: 6, loop: 'play',  wa: 'run',   session: 'auto',           label: 'normal audio mode (follows the silent switch)' },
+  { id: 7, loop: 'play',  wa: 'run',   session: 'playback',       label: 'short pieces, one sentence at a time', chunk: true },
 ];
 function deviceMode() { return LAB_VARIANTS.find((v) => v.id === +S.deviceMode) || LAB_VARIANTS[0]; }
 function holdLoop(forDevice) {
@@ -320,6 +321,10 @@ function playLoop() { if (keepAlive && loopHold === 0 && !loopPausedForSpeech) k
 // Queue something to be said. Long text is split into sentences (iOS can cut off long utterances).
 function cleanSpeech(text) { // make written text sound right: no "---" lines, markdown, "m^2", "×", "≈", "°"
   return String(text || '')
+    .replace(/\\(?:text|mathrm|mathbf|operatorname)\{([^}]*)\}/g, '$1')
+    .replace(/\\frac\{([^}]*)\}\{([^}]*)\}/g, '$1 over $2').replace(/\\sqrt\{([^}]*)\}/g, 'square root of $1')
+    .replace(/\\(omega|pi|theta|alpha|beta|gamma|delta|mu|sigma|lambda|phi)\b/g, ' $1 ').replace(/\\(?:cdot|times)\b/g, ' times ')
+    .replace(/\\[a-zA-Z]+/g, ' ').replace(/\^\{([^}]*)\}/g, ' to the power $1 ').replace(/_\{([^}]*)\}/g, ' $1 ').replace(/[$]|[{}]/g, '')
     .replace(/^\s*[-=_*~]{3,}\s*$/gm, ' ')
     .replace(/[*_#`>]/g, '')
     .replace(/\^2(?![\d])/g, ' squared').replace(/\^3(?![\d])/g, ' cubed').replace(/\^\(?(-?[\d.]+)\)?/g, ' to the power $1')
@@ -381,9 +386,24 @@ function splitSpeech(text) {
 }
 
 // The iPhone's own voice (speechSynthesis). Resolves with what happened, for the audio check.
+function deviceChunks(text) { // short pieces (one sentence or so): iOS keeps these alive much better than one long utterance
+  const parts = String(text).match(/[^.!?;:\n]+[.!?;:]*\s*/g) || [text], out = [];
+  for (const p of parts) { const t = p.trim(); if (!t) continue; if (out.length && (out[out.length - 1] + ' ' + t).length <= 90) out[out.length - 1] += ' ' + t; else out.push(t); }
+  return out;
+}
+async function speakDevice(text) { // piece by piece; if a piece dies, report exactly how far we got
+  const pieces = deviceChunks(text); let off = 0, any = false;
+  for (const piece of pieces) {
+    const at = text.indexOf(piece, off), r = await speakDeviceNow(piece);
+    if (r.started) any = true;
+    if (!r.started || r.died || r.error) return { started: any, died: r.started, error: r.error, spokenChars: Math.max(0, at) + (r.died ? Math.min(r.spokenChars || 0, piece.length) : 0), failed: true };
+    off = at + piece.length;
+  }
+  return { started: any, died: false, error: '', spokenChars: text.length, failed: false };
+}
 function speakDeviceNow(text) {
   return new Promise((resolve) => {
-    let done = false, started = false, tries = 0, cur = null, kick = null, poll = null, errName = '';
+    let done = false, started = false, tries = 0, cur = null, kick = null, poll = null, errName = '', died = false, gotB = false, lastB = 0, spoke = 0;
     deviceSpeaking = true;
     const dm = deviceMode();
     try { if (navigator.audioSession) navigator.audioSession.type = dm.session; } catch {}
@@ -392,8 +412,9 @@ function speakDeviceNow(text) {
     // Generous time limit from the word count (≈140 words a minute, plus margin). If iOS gets stuck, we STOP it
     // (so the next sentence isn't queued behind a stuck one) and move on.
     const words = text.split(/\s+/).length;
-    const limit = Math.max(6000, 2500 + words / 2.3 * 1000 / (S.rate || 1) * 1.6);
+    const limit = Math.max(5000, 2000 + words / 2.3 * 1000 / (S.rate || 1) * 1.35);
     const total = setTimeout(() => {
+      if (started) died = true;
       sev(started ? 'voice stuck — stopping it' : 'voice never started — giving up on this line');
       if (!started) { speechNote = 'Speech is not starting — run Speech & sounds → Audio check'; }
       try { speechSynthesis.cancel(); } catch {}
@@ -402,7 +423,7 @@ function speakDeviceNow(text) {
     const finish = () => {
       if (done) return; done = true; speaking = false; deviceSpeaking = false; clearTimeout(total); clearTimeout(kick); clearInterval(poll);
       setAudioSession(); // back to the normal audio mode
-      setSub(); resolve({ started, error: errName });
+      setSub(); resolve({ started, error: errName, died, spokenChars: spoke });
     };
     const say = () => {
       tries++;
@@ -413,7 +434,8 @@ function speakDeviceNow(text) {
       u.lang = (v && v.lang) || 'en-US';
       u.rate = S.rate || 1; u.volume = 1;
       const short = '"' + text.slice(0, 24) + (text.length > 24 ? '…"' : '"');
-      u.onstart = () => { if (cur !== u) return; started = true; sev('voice started ' + short); if (/not starting/.test(speechNote)) speechNote = ''; clearTimeout(kick); };
+      u.onstart = () => { if (cur !== u) return; started = true; lastB = Date.now(); sev('voice started ' + short); if (/not starting/.test(speechNote)) speechNote = ''; clearTimeout(kick); };
+      u.onboundary = (e) => { if (cur !== u) return; gotB = true; lastB = Date.now(); spoke = e.charIndex || 0; };
       u.onpause = () => sev('voice PAUSED by iOS ' + short);
       u.onresume = () => sev('voice resumed ' + short);
       const end = () => { liveUtterances.delete(u); if (cur === u) finish(); };
@@ -424,6 +446,11 @@ function speakDeviceNow(text) {
       clearInterval(poll);
       poll = setInterval(() => {
         if (done || cur !== u || !started) return;
+        // iOS can take the audio away ~1–3 s in and never say so: words stop arriving. Notice fast, stop it, hand the rest on.
+        if (gotB && Date.now() - lastB > 2500 && (speechSynthesis.speaking || speechSynthesis.pending)) {
+          died = true; sev('voice DIED after ' + spoke + ' of ' + text.length + ' characters — taking over'); liveUtterances.delete(u);
+          try { speechSynthesis.cancel(); } catch {} finish(); return;
+        }
         if (!speechSynthesis.speaking && !speechSynthesis.pending) { sev('voice finished ' + short + ' (no end event)'); liveUtterances.delete(u); finish(); }
       }, 300);
       kick = setTimeout(() => {
@@ -557,10 +584,18 @@ async function playVoice(text, firstJob, more = false) {
     if (eng === 'device') { // last resort: the iPhone's own voice (unlimited and free)
       holdLoop(true);
       try {
-        const r = await speakDeviceNow(text);
-        if (r.started && !r.error) { if (/^Voice/.test(speechNote)) speechNote = ''; return; }
-        errs.push('iPhone voice did not start');
-        engineBackoff.device = Date.now() + 60000; sev('iPhone voice did not start — using the online voices for the next minute'); // don't wait ~7 s on every piece
+        const r = await speakDevice(text);
+        if (!r.failed) { if (/^Voice/.test(speechNote)) speechNote = ''; return; }
+        if (r.started) { // it spoke part of it, then iOS cut it off: the online voice carries on from there, not from the start
+          const rest = text.slice(Math.max(0, r.spokenChars)).trim();
+          errs.push('iPhone voice stopped part-way');
+          engineBackoff.device = Date.now() + 300000; sev('iPhone voice stopped after ' + r.spokenChars + ' characters — online voice continues; iPhone voice rests 5 min');
+          if (!rest) return;
+          text = rest; firstJob = null;
+        } else {
+          errs.push('iPhone voice did not start');
+          engineBackoff.device = Date.now() + 60000; sev('iPhone voice did not start — using the online voices for the next minute');
+        }
       }
       finally { releaseLoop(); }
       continue;
@@ -1673,7 +1708,7 @@ async function runLab() {
   const log = (t) => { lines.push(t); out.textContent = lines.join('\n'); labReport = lines.join('\n'); };
   const banner = (t) => { $('labBanner').textContent = t; };
   $('labHeard').hidden = true; $('btnLab').disabled = true; $('labMsg').textContent = '';
-  const prev = S.deviceMode, names = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six'];
+  const prev = S.deviceMode, names = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven'], LONG = ' This is a longer sentence to see whether the voice survives past three seconds. It keeps going with a few more words, and then it stops. Now the last short one.';
   log('App ' + APP_VERSION + ' · ' + (navigator.userAgent.match(/(iPhone|iPad)[^;)]*|OS [\d_]+|Version\/[\d.]+/g) || [navigator.userAgent.slice(0, 60)]).join(' · '));
   log('Audio mode: ' + (navigator.audioSession ? navigator.audioSession.type : 'not supported') + ' · voices: ' + speechSynthesis.getVoices().length + ' · camera: ' + (track && track.readyState === 'live' ? 'on' : 'off'));
   await speechChain;
@@ -1684,9 +1719,9 @@ async function runLab() {
     S.deviceMode = v.id; // speakDeviceNow plays in whatever set-up this says
     holdLoop(true);
     await applyDeviceMode(v);
-    const r = await speakDeviceNow('Voice ' + names[v.id] + '.');
+    const txt = 'Voice ' + names[v.id] + '.' + LONG, r = v.chunk ? await speakDevice(txt) : await speakDeviceNow(txt);
     releaseLoop();
-    log(v.id + '. ' + v.label + ' — ' + (r.started ? 'started' + (r.error ? ', then error: ' + r.error : ' and finished') : 'did NOT start' + (r.error ? ' (' + r.error + ')' : '')));
+    log(v.id + '. ' + v.label + ' — ' + (r.died ? 'DIED after ' + (r.spokenChars || 0) + ' of ' + txt.length + ' characters' : r.started ? 'started' + (r.error ? ', then error: ' + r.error : ' and finished (' + txt.length + ' characters)') : 'did NOT start' + (r.error ? ' (' + r.error + ')' : '')));
     await sleep(900);
   }
   S.deviceMode = prev; setAudioSession(); await wakeAudio(); playLoop();
