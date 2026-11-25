@@ -4,14 +4,10 @@ An iPhone hidden in a box looks at a paper Q&A card, reads it with Google Gemini
 speaks a short answer into your earbud. It is a plain web page (no App Store, no Mac),
 served free by GitHub Pages and opened in Safari.
 
-**Current stage: Phase 0.** This is only a camera test page. It shows how sharp the
-iPhone camera can get through a web page and how well Gemini reads 12pt text. The show
-app gets built after you've tested this.
-
 ## How the pieces fit
 
 ```
-iPhone Safari (docs/test.html)  ──photo──▶  Cloudflare Worker (worker/proxy.js)  ──▶  Gemini
+iPhone Safari (docs/app.html)  ──photo──▶  Cloudflare Worker (worker/proxy.js)  ──▶  Gemini
         ▲                                     holds your secret key                       │
         └──────────────── text answer ◀───────────────────────────────────────────────────┘
 ```
@@ -20,9 +16,18 @@ iPhone Safari (docs/test.html)  ──photo──▶  Cloudflare Worker (worker/
 - **`worker/proxy.js`** is a small program that runs on Cloudflare (free). It keeps
   your Gemini key, so the key is never in this repo or on the web page.
 
+| File | What it is |
+|---|---|
+| `docs/app.html` + `docs/app.js` | **The show app** |
+| `docs/log.html` | Capture log: what the camera saw, and the replies |
+| `docs/test.html` | Phase 0 camera/reading test page |
+| `docs/rehearsal-checklist.md` | Step-by-step pre-show checklist |
+| `docs/sw.js`, `docs/manifest.webmanifest`, `docs/icons/` | Home-screen app support |
+| `worker/proxy.js` | Cloudflare Worker that holds the Gemini key |
+
 ---
 
-## One-time setup (about 20 minutes, all from your iPhone)
+## One-time setup (all from your iPhone)
 
 Use Safari for everything. Some dashboards work better if you tap **aA** in the address
 bar and choose **Request Desktop Website**.
@@ -30,103 +35,114 @@ bar and choose **Request Desktop Website**.
 ### Step 1: Get a Gemini API key
 
 1. Go to **aistudio.google.com** and sign in with a Google account.
-2. Tap **Get API key** (in the menu, or at the bottom left on desktop view).
-3. Tap **Create API key**, then copy it.
-4. Paste it into Notes for now. **Never paste it into GitHub.** You'll delete the note
+2. Tap **Get API key** → **Create API key**, then copy it.
+3. Paste it into Notes for now. **Never paste it into GitHub.** You'll delete the note
    after Step 3.
 
 ### Step 2: Make up an app password
 
 Make up a long random password, e.g. `blue-tiger-4417-lamp-orbit`. This is your
-**APP_TOKEN**. The web page sends it to the Worker so strangers can't use your Gemini
-credit. Save it in Notes too.
+**APP_TOKEN**. The app sends it to the Worker so strangers can't use your Gemini credit.
 
-### Step 3: Create the Cloudflare Worker
+### Step 3: Create (or update) the Cloudflare Worker
 
-1. Go to **dash.cloudflare.com** and sign up (free plan is fine).
-2. In the menu, tap **Workers & Pages** (it may be under **Compute**).
-3. Tap **Create** → **Create Worker** (or **Start with Hello World!**).
-4. Name it `card-proxy`, then tap **Deploy**.
-5. Tap **Edit code**.
-6. In another Safari tab, open this repo on GitHub, go to **worker → proxy.js**, and tap
-   the **copy** icon (two overlapping squares) above the code.
-7. Back in the Cloudflare editor, tap inside the code, select all (long-press →
-   **Select All**), and **Paste** over it.
-8. Tap **Deploy** (top right), then go back to the Worker's page.
-9. Open **Settings** → **Variables and Secrets** → **Add**:
-   - Type **Secret**, name `GEMINI_API_KEY`, value = your Gemini key → **Save/Deploy**
-   - Type **Secret**, name `APP_TOKEN`, value = your app password → **Save/Deploy**
+1. Go to **dash.cloudflare.com** and sign in. Tap **Workers & Pages** (it may be under
+   **Compute**).
+2. **New Worker:** tap **Create** → **Create Worker**, name it `card-proxy`, tap **Deploy**.
+   **Existing Worker:** tap `card-proxy`.
+3. Tap **Edit code**.
+4. In another Safari tab, open this repo on GitHub → **worker** → **proxy.js**, and tap the
+   **copy** icon (two overlapping squares) above the code.
+5. Back in the Cloudflare editor, tap inside the code, long-press → **Select All**, then
+   **Paste**. Tap **Deploy**.
+6. First time only: open **Settings** → **Variables and Secrets** → **Add**:
+   - Type **Secret**, name `GEMINI_API_KEY`, value = your Gemini key
+   - Type **Secret**, name `APP_TOKEN`, value = your app password
    - Type **Text**, name `ALLOWED_ORIGIN`, value = `https://jtacoolbeans-hub.github.io`
-     (no slash at the end) → **Save/Deploy**
-10. Copy the Worker's address from its overview page. It looks like
-    `https://card-proxy.<something>.workers.dev`.
-11. Delete the Gemini key from Notes.
+     (no slash at the end)
+7. Copy the Worker's address (`https://card-proxy.<something>.workers.dev`). Delete the
+   Gemini key from Notes.
+
+> **Already set up for Phase 0?** You still need to do steps 3–5 once more. The new Worker
+> tries backup models when Gemini is busy and fixes the "invalid argument" error. Your
+> secrets stay as they are. The app shows ❌ *Worker is OUT OF DATE* until you do this.
 
 ### Step 4: Turn on GitHub Pages
 
-1. Open this repo on github.com → **Settings** (you may need desktop view) → **Pages**.
-2. Under **Build and deployment**, set **Source** to **Deploy from a branch**.
-3. Under **Branch**, pick `claude/stage-performer-phone-assistant-5bgbk0` (or `main` once
-   the work is merged there) and set the folder to **/docs**. Tap **Save**.
-4. Wait 1–2 minutes, then refresh. The page shows **"Your site is live at …"**. Tap
-   that link.
+1. On github.com, open this repo → **Settings** → **Pages**.
+2. **Source:** **Deploy from a branch**. **Branch:** the branch with this code, folder
+   **/docs**. Tap **Save**.
+3. After 1–2 minutes, the page shows **"Your site is live at …"**.
 
-> If the repo is **private**, Pages needs a paid GitHub plan. The free fix is to make the
-> repo public (Settings → General → Danger Zone → Change visibility). That is safe,
-> because no secret is stored in the repo.
+### Step 5: Open the show app and add it to your Home Screen
 
-### Step 5: Open the test page
-
-1. On the site, tap **Phase 0: camera & reading test** (or add `/test.html` to the
-   address).
-2. In **1. Connection**, paste the Worker URL and your app password, then tap
-   **Save & test connection**. You want four green ✅ lines.
+1. Open `https://jtacoolbeans-hub.github.io/Photo-ai/app.html` (or tap **Open the show app**
+   on the site's front page).
+2. Open **Connection**, paste the Worker URL and app password, then tap **Test connection**.
+   You want four ✅ lines.
+3. Optional: tap the **Share** button (square with an up-arrow) → **Add to Home Screen** →
+   **Add**. You'll get a full-screen "Cards" icon. If the screen lock or earbud buttons
+   misbehave from the icon, use the Safari tab instead. See the rehearsal checklist.
 
 ---
 
-## Phase 0 test: what to try
+## Using the show app
 
-1. Tap **Start camera** and allow camera access. The big line shows the resolution you
-   actually **got** (for example `3840 × 2160`). Tell me that number.
-2. Try each choice under **Camera** (Back Camera, Back Ultra Wide, Back Dual Wide…)
-   and note which looks sharpest up close.
-3. Put a real 12pt Times New Roman card at the distance it will sit in the box. Keep
-   the prompt on **Transcribe exactly**, set a 5-second delay, tap
-   **Capture + send to Gemini**, and place the phone.
-4. Look at the reply. Is every word right? Tap the still and pinch to zoom in on what the
-   camera saw.
-5. Move the **crop sliders** so the yellow box hugs the card, then send again. Cropping
-   sends only the card area, which usually reads better and uploads faster.
-6. If **Zoom** or **Torch** controls show up, try them. A little zoom puts more pixels
-   on the text, and the torch can light a dark box.
-7. Switch the prompt to **Show prompt (Q: / A: / NONE)** and tap **Speak reply** with
-   your earbuds in.
-8. Try **Fast mode** on and off, and compare the times shown.
+1. Tap **START**. This unlocks sound, the camera, the screen lock and the earbud buttons.
+   On iPhone, all of these need one real tap.
+2. Tap **Draw crop box** and drag a box around where the card sits. Only that area is
+   checked and sent, which means sharper text and faster uploads.
+3. **Arm** with a single earbud press (or the ARM button). The app then:
+   - watches for the picture to go **still**,
+   - compares a few frames and keeps the **sharpest**,
+   - sends it to Gemini and **speaks the answer**,
+   - waits for the card to **change** before reading again.
+4. Tap **SHOW MODE** for a black screen (double-tap the screen to exit).
+5. After the show, open **CAPTURE LOG** to see every capture.
 
-**Send me back:** the resolution you got, the best camera choice, the card distance,
-whether the reading was accurate, and typical reply times. I'll tune the main app to
-match.
+### Earbud buttons
 
-### If something goes wrong
+| Press | Default |
+|---|---|
+| Single (play/pause) | Arm / disarm |
+| Double (next track) | Capture now |
+| Triple (previous track) | Repeat last answer |
+
+These only work while the app is open and nothing else is playing audio.
+
+### Settings worth tuning (all saved on the phone)
+
+- **Gemini → Models to try:** `gemini-3.5-flash, gemini-flash-latest`. If the first is busy,
+  the next is tried automatically. Fix the names if you see "model not found".
+- **Timeout & stall line:** after how many seconds the stall line plays, and what it says.
+- **Detection:** the motion threshold, how many still checks to wait for, the minimum
+  sharpness, and so on. Watch the live meters under the camera view while you tune these.
+- **Heat & battery:** how often it checks when disarmed, armed, and while a card is settling.
+
+### Updates
+
+When the code changes on GitHub, just **close and reopen the app**. It always loads the
+newest version when online. The only exception is a change to `worker/proxy.js`; then
+redo Step 3 (steps 3–5). The app will tell you if that's needed.
+
+---
+
+## Phase 0 test page
+
+`docs/test.html` is still there for camera experiments: try resolutions, cameras, zoom,
+crop and prompts, and see exactly what Gemini reads. It's useful when changing the box or
+lighting.
+
+## If something goes wrong
 
 | What you see | Fix |
 |---|---|
-| ❌ Gemini key / APP_TOKEN | Re-add the secret in Cloudflare (Step 3.9), spelled exactly. |
-| ❌ Token you typed matches | Retype the app password on the test page. |
-| ❌ This page is allowed | `ALLOWED_ORIGIN` must be exactly `https://jtacoolbeans-hub.github.io` with no slash. |
-| "model not found" | Change the **Gemini model** box, e.g. `gemini-2.5-flash`. |
-| Error with Fast mode on | Untick Fast mode. Some models don't accept that setting. |
-| Camera error / black video | Safari → Settings → Apps → Safari → Camera → **Allow**, then reload. |
-
----
-
-## Files
-
-| File | What it is |
-|---|---|
-| `docs/index.html` | Landing page |
-| `docs/test.html` | Phase 0 camera/reading test |
-| `worker/proxy.js` | Cloudflare Worker that holds the Gemini key |
-
-Coming in Phase 1: the show app (`docs/app.html`), offline/home-screen support, and
-`docs/rehearsal-checklist.md`.
+| ❌ Gemini key / App token | Re-add the secret in Cloudflare, spelled exactly. |
+| ❌ This page is allowed | `ALLOWED_ORIGIN` must be exactly `https://jtacoolbeans-hub.github.io` |
+| ❌ Worker is OUT OF DATE | Paste the new `worker/proxy.js` into Cloudflare (Step 3). |
+| "model not found" | Fix the names under **Gemini → Models to try**. |
+| "high demand" | Add a second model to the list; the Worker falls back automatically. |
+| Camera error / black video | iPhone Settings → Apps → Safari → Camera → **Allow**, reload. |
+| Earbud buttons do nothing | Tap START again; close music/podcast apps; check the earbuds are connected. |
+| "Screen lock: NOT held" | Set iPhone Auto-Lock to **Never** (Settings → Display & Brightness). |
+| Reads the empty box / never captures | Adjust **Minimum sharpness** using the live meter. |

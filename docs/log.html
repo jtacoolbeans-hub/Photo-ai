@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Capture Log</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; padding:calc(env(safe-area-inset-top) + 10px) 12px 60px; background:#0b0b0b; color:#eee;
+         font:15px -apple-system, system-ui, sans-serif; }
+  h1 { font-size:20px; margin:4px 0 10px; }
+  h3 { font-size:14px; color:#4fa3ff; margin:18px 0 6px; }
+  button, a.btn { font-size:15px; padding:10px 12px; border-radius:10px; border:0; background:#2a2a2a; color:#eee;
+           font-weight:600; margin:0 6px 6px 0; text-decoration:none; display:inline-block; }
+  .e { display:flex; gap:10px; background:#181818; border-radius:10px; padding:8px; margin-bottom:8px; }
+  .e img { width:120px; height:auto; border-radius:6px; flex:0 0 auto; align-self:flex-start; }
+  .e .t { font-size:13px; color:#999; } .e .r { white-space:pre-wrap; word-break:break-word; margin-top:4px; }
+  .answer { color:#4caf50; } .late-answer { color:#8bc34a; } .fail, .none { color:#ff5252; } .none-retry, .duplicate { color:#ffb300; }
+  #big { position:fixed; inset:0; background:#000; display:none; z-index:9; overflow:auto; }
+  #big img { width:100%; height:auto; }
+  #sum { color:#999; font-size:13px; }
+</style>
+</head>
+<body>
+<h1>Capture log</h1>
+<a class="btn" href="app.html">← Back to app</a>
+<button id="exp">Export (save a file)</button>
+<button id="clr">Clear log</button>
+<div id="sum"></div>
+<div id="list">Loading…</div>
+<div id="big"></div>
+<script>
+'use strict';
+const DB_NAME = 'cardAssistantLog', STORE = 'captures';
+function open() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open(DB_NAME, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+}
+async function all() {
+  const d = await open();
+  return new Promise((res, rej) => { const q = d.transaction(STORE).objectStore(STORE).getAll(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
+}
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+async function render() {
+  const items = (await all()).sort((a, b) => b.t - a.t);
+  const list = document.getElementById('list');
+  if (!items.length) { list.textContent = 'No captures yet.'; document.getElementById('sum').textContent = ''; return; }
+  const ok = items.filter((e) => /answer/.test(e.status));
+  const avg = ok.length ? ok.reduce((s, e) => s + (e.latencyMs || 0), 0) / ok.length / 1000 : 0;
+  document.getElementById('sum').textContent = items.length + ' captures · ' + ok.length + ' answered · average ' + avg.toFixed(1) + ' s';
+  let html = '', day = '';
+  for (const e of items) {
+    const d = new Date(e.t), ds = d.toLocaleDateString();
+    if (ds !== day) { day = ds; html += '<h3>' + esc(ds) + '</h3>'; }
+    html += '<div class="e"><img src="' + e.thumb + '" data-id="' + e.id + '"><div>' +
+      '<div class="t">' + esc(d.toLocaleTimeString()) + ' · ' + esc(e.trigger) + ' · <b class="' + esc(e.status) + '">' + esc(e.status) + '</b></div>' +
+      '<div class="t">' + ((e.latencyMs || 0) / 1000).toFixed(1) + ' s · sharp ' + esc(e.sharp) + ' · motion ' + esc(e.motion) +
+      ' · ' + esc(e.w) + '×' + esc(e.h) + ' · ' + esc(e.kb) + ' KB · ' + esc(e.model) + '</div>' +
+      '<div class="r">' + esc(e.reply || e.error || '') + '</div></div></div>';
+  }
+  list.innerHTML = html;
+}
+document.getElementById('list').addEventListener('click', (ev) => {
+  if (ev.target.tagName !== 'IMG') return;
+  const big = document.getElementById('big');
+  big.innerHTML = '<img src="' + ev.target.src + '">'; big.style.display = 'block';
+});
+document.getElementById('big').onclick = function () { this.style.display = 'none'; };
+document.getElementById('exp').onclick = async () => {
+  const items = await all();
+  const blob = new Blob([JSON.stringify(items, null, 1)], { type: 'application/json' });
+  const name = 'card-log-' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.json';
+  const file = new File([blob], name, { type: 'application/json' });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file] }); return; } catch {}
+  }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click();
+};
+document.getElementById('clr').onclick = async () => {
+  if (!confirm('Delete every logged capture?')) return;
+  const d = await open();
+  d.transaction(STORE, 'readwrite').objectStore(STORE).clear().onsuccess = render;
+};
+render().catch((e) => { document.getElementById('list').textContent = 'Could not open log: ' + e.message; });
+</script>
+</body>
+</html>

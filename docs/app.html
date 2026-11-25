@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Card Assistant">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<title>Card Assistant</title>
+<style>
+  :root { color-scheme: dark; --bg:#0b0b0b; --fg:#eee; --mut:#8a8a8a; --acc:#4fa3ff; --ok:#4caf50; --warn:#ffb300; --bad:#ff5252; --card:#181818; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { background:var(--bg); }
+  body { margin:0; padding:calc(env(safe-area-inset-top) + 10px) 12px calc(env(safe-area-inset-bottom) + 60px);
+         color:var(--fg); font:16px -apple-system, system-ui, sans-serif; }
+  h2 { font-size:16px; margin:0; color:var(--acc); }
+  section, details { background:var(--card); border-radius:12px; padding:12px; margin-bottom:10px; }
+  details > summary { font-weight:600; color:var(--acc); list-style:none; cursor:pointer; }
+  details > summary::before { content:'▸ '; } details[open] > summary::before { content:'▾ '; }
+  label { display:block; margin:10px 0 4px; color:var(--mut); font-size:14px; }
+  label.chk { color:var(--fg); font-size:15px; }
+  .hint { color:var(--mut); font-size:13px; margin-top:3px; }
+  input[type=text], input[type=password], input[type=number], select, textarea {
+    width:100%; font-size:16px; padding:10px; border-radius:8px; border:1px solid #333; background:#000; color:var(--fg); }
+  textarea { min-height:80px; }
+  input[type=range] { width:100%; }
+  button { font-size:16px; padding:12px 14px; border-radius:10px; border:0; background:#2a2a2a; color:var(--fg);
+           font-weight:600; margin:6px 6px 0 0; }
+  button.pri { background:var(--acc); color:#000; }
+  button.big { font-size:18px; padding:16px; flex:1 1 45%; margin:0; }
+  button:disabled { opacity:.35; }
+  .grid { display:flex; flex-wrap:wrap; gap:8px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; } .row > * { flex:1 1 140px; }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size:13px; white-space:pre-wrap; word-break:break-word; }
+  #state { display:flex; align-items:center; gap:10px; font-size:22px; font-weight:700; }
+  #dot { width:16px; height:16px; border-radius:50%; background:#555; flex:0 0 auto; }
+  #sub { color:var(--mut); font-size:13px; margin-top:4px; }
+  #stage { position:relative; width:100%; background:#000; border-radius:8px; overflow:hidden; margin-top:8px; }
+  #stage.drawing { touch-action:none; outline:2px dashed var(--warn); }
+  #video { display:block; width:100%; height:auto; }
+  #cropBox { position:absolute; border:2px solid #ff0; box-shadow:0 0 0 9999px rgba(0,0,0,.45); pointer-events:none; }
+  .meters { display:grid; grid-template-columns: repeat(4, 1fr); gap:6px; margin-top:8px; text-align:center; }
+  .meters div { background:#000; border-radius:8px; padding:6px 2px; }
+  .meters b { display:block; font-size:18px; } .meters span { font-size:11px; color:var(--mut); }
+  .bar { height:6px; background:#333; border-radius:3px; overflow:hidden; margin-top:4px; }
+  .bar i { display:block; height:100%; width:0; background:var(--acc); }
+  #lastQ { color:var(--mut); } #lastA { font-size:18px; margin-top:6px; }
+  #show { position:fixed; inset:0; background:#000; z-index:50; display:none; }
+  #show .tiny { position:absolute; left:12px; bottom:calc(env(safe-area-inset-bottom) + 10px); color:#222; font-size:12px; }
+  body.showmode #video { position:fixed; width:2px !important; height:2px; opacity:0.01; top:0; left:0; }
+  a { color:var(--acc); }
+</style>
+</head>
+<body>
+
+<section>
+  <div id="state"><span id="dot"></span><span id="stateText">Not started</span></div>
+  <div id="sub">Tap START to begin.</div>
+  <div class="grid" style="margin-top:12px">
+    <button id="btnStart" class="big pri">START</button>
+    <button id="btnArm" class="big" disabled>ARM</button>
+    <button id="btnForce" class="big" disabled>CAPTURE NOW</button>
+    <button id="btnRepeat" class="big" disabled>REPEAT</button>
+    <button id="btnShow" class="big" disabled>SHOW MODE (black screen)</button>
+    <a href="log.html" class="big" style="flex:1 1 45%"><button class="big" style="width:100%">CAPTURE LOG</button></a>
+  </div>
+</section>
+
+<section>
+  <h2>Camera view</h2>
+  <div id="stage"><video id="video" playsinline muted autoplay></video><div id="cropBox"></div></div>
+  <div class="meters">
+    <div><b id="mMotion">–</b><span>motion</span><div class="bar"><i id="barMotion"></i></div></div>
+    <div><b id="mSharp">–</b><span>sharpness</span><div class="bar"><i id="barSharp"></i></div></div>
+    <div><b id="mStill">–</b><span>still frames</span></div>
+    <div><b id="mFps">–</b><span>checks/sec</span></div>
+  </div>
+  <div class="hint" id="camInfo"></div>
+  <button id="btnDraw">Draw crop box</button>
+  <button id="btnCropReset">Full frame</button>
+</section>
+
+<section>
+  <h2>Last answer</h2>
+  <div id="lastQ" style="margin-top:6px">–</div>
+  <div id="lastA">–</div>
+  <div class="hint" id="lastInfo"></div>
+</section>
+
+<details>
+  <summary>Connection</summary>
+  <label>Worker URL</label>
+  <input type="text" data-k="workerUrl" placeholder="https://card-proxy.YOURNAME.workers.dev" autocapitalize="off" autocorrect="off">
+  <label>App token (APP_TOKEN)</label>
+  <input type="password" data-k="token" autocapitalize="off" autocorrect="off">
+  <button id="btnTestConn">Test connection</button>
+  <div id="connOut" class="mono hint"></div>
+</details>
+
+<details>
+  <summary>Gemini</summary>
+  <label>Models to try, in order (comma-separated)</label>
+  <input type="text" data-k="models" autocapitalize="off" autocorrect="off">
+  <div class="hint">If the first is busy or fails, the next one is tried automatically.</div>
+  <div class="row">
+    <div><label>Image detail</label>
+      <select data-k="mediaResolution">
+        <option value="">Default</option>
+        <option value="MEDIA_RESOLUTION_HIGH">High</option>
+        <option value="MEDIA_RESOLUTION_MEDIUM">Medium</option>
+        <option value="MEDIA_RESOLUTION_LOW">Low</option>
+      </select></div>
+    <div><label>Speed (thinking)</label>
+      <select data-k="thinking">
+        <option value="">Model default</option>
+        <option value="budget0">Off (2.5-style models)</option>
+        <option value="minimal">Minimal (3.x models)</option>
+        <option value="low">Low (3.x models)</option>
+      </select></div>
+  </div>
+  <div class="hint">If a model rejects these, the Worker quietly retries without them.</div>
+  <label>Prompt</label>
+  <textarea data-k="prompt" style="min-height:150px"></textarea>
+  <button id="btnPromptReset">Reset prompt</button>
+  <div class="row">
+    <div><label>Upload size (longest side, px)</label><input type="number" data-k="maxSide" min="512" max="4032" step="64"></div>
+    <div><label>JPEG quality (50–95)</label><input type="number" data-k="jpegQuality" min="50" max="95"></div>
+  </div>
+</details>
+
+<details>
+  <summary>Timeout &amp; stall line</summary>
+  <label>Speak the stall line after (seconds)</label>
+  <input type="number" data-k="timeoutSec" min="2" max="30" step="0.5">
+  <label>Stall line (spoken if Gemini is slow, fails, or can't read the card)</label>
+  <textarea data-k="stallLine"></textarea>
+  <label class="chk"><input type="checkbox" data-k="lateAnswer"> If the answer arrives after the stall line, still speak it</label>
+  <label>…but give up completely after (extra seconds)</label>
+  <input type="number" data-k="lateSec" min="0" max="40">
+  <label>If Gemini says it can't read the card, re-capture this many times before stalling</label>
+  <input type="number" data-k="retryNone" min="0" max="3">
+</details>
+
+<details>
+  <summary>Speech &amp; sounds</summary>
+  <label>Voice</label>
+  <select id="voiceSel" data-k="voiceURI"><option value="">System default</option></select>
+  <div class="row">
+    <div><label>Speech speed (0.5–1.5)</label><input type="number" data-k="rate" min="0.5" max="1.5" step="0.05"></div>
+    <div><label>Tone volume (0–1)</label><input type="number" data-k="toneVol" min="0" max="1" step="0.05"></div>
+  </div>
+  <label class="chk"><input type="checkbox" data-k="speakQuestion"> Speak the question before the answer</label>
+  <label class="chk"><input type="checkbox" data-k="thinkTicks"> Soft tick every 2 s while waiting for Gemini</label>
+  <div>
+    <button data-tone="ready">Ready</button><button data-tone="disarmed">Disarmed</button>
+    <button data-tone="captured">Captured</button><button data-tone="thinking">Thinking</button>
+    <button data-tone="answer">Answer</button><button data-tone="failed">Failed</button>
+    <button id="btnTestVoice">Test voice</button>
+  </div>
+</details>
+
+<details>
+  <summary>Earbud buttons</summary>
+  <div class="hint">AirPods / most earbuds: single press = play/pause, double = next track, triple = previous track.
+  This only works after START, while the app is open and nothing else is playing music.</div>
+  <label>Single press</label>
+  <select data-k="btnSingle">
+    <option value="toggle">Arm / disarm</option><option value="capture">Capture now</option>
+    <option value="repeat">Repeat last answer</option><option value="none">Nothing</option></select>
+  <label>Double press</label>
+  <select data-k="btnDouble">
+    <option value="toggle">Arm / disarm</option><option value="capture">Capture now</option>
+    <option value="repeat">Repeat last answer</option><option value="none">Nothing</option></select>
+  <label>Triple press</label>
+  <select data-k="btnTriple">
+    <option value="toggle">Arm / disarm</option><option value="capture">Capture now</option>
+    <option value="repeat">Repeat last answer</option><option value="none">Nothing</option></select>
+  <label class="chk"><input type="checkbox" data-k="autoArm"> Arm automatically when I tap START</label>
+  <div class="hint" id="mediaInfo"></div>
+</details>
+
+<details>
+  <summary>Camera &amp; crop</summary>
+  <label>Camera</label>
+  <select id="camSel" data-k="camId"><option value="">Back camera (default)</option></select>
+  <div class="row">
+    <div><label>Resolution</label>
+      <select data-k="res">
+        <option value="max">Highest possible</option>
+        <option value="3840x2160">3840 × 2160</option>
+        <option value="1920x1440">1920 × 1440</option>
+        <option value="1920x1080">1920 × 1080</option>
+      </select></div>
+    <div><label>Camera frame rate</label>
+      <select data-k="camFps"><option value="10">10 fps (coolest)</option><option value="15">15 fps</option><option value="30">30 fps</option></select></div>
+  </div>
+  <div id="zoomRow" style="display:none"><label>Zoom: <span id="zoomVal"></span></label><input id="zoom" type="range"></div>
+  <label class="chk" id="torchRow" style="display:none"><input type="checkbox" data-k="torch"> Torch (flashlight) on</label>
+  <label class="chk"><input type="checkbox" data-k="useCrop"> Use crop box (only the yellow area is checked and sent)</label>
+  <div class="hint">Tap “Draw crop box” under the camera view, then drag a box around where the card sits.</div>
+</details>
+
+<details>
+  <summary>Detection (stillness &amp; sharpness)</summary>
+  <div class="hint">Watch the meters above while you place and hold a card to pick these numbers.</div>
+  <label>Motion threshold — below this counts as “still”</label>
+  <input type="number" data-k="motionThresh" min="0.5" max="40" step="0.5">
+  <label>Still checks needed before capturing</label>
+  <input type="number" data-k="stillFrames" min="1" max="20">
+  <label>Frames to compare (the sharpest one is sent)</label>
+  <input type="number" data-k="windowFrames" min="1" max="15">
+  <label>Minimum sharpness (blank box / blurry frames stay below this)</label>
+  <input type="number" data-k="sharpMin" min="0" max="5000" step="5">
+  <label>After an answer, wait for the card to change (movement above this) before reading again</label>
+  <input type="number" data-k="changeThresh" min="1" max="60" step="0.5">
+  <label>Minimum seconds between automatic reads</label>
+  <input type="number" data-k="cooldownSec" min="0" max="60">
+</details>
+
+<details>
+  <summary>Heat &amp; battery</summary>
+  <div class="row">
+    <div><label>Checks/sec when disarmed</label><input type="number" data-k="idleFps" min="0.2" max="5" step="0.1"></div>
+    <div><label>Checks/sec when armed &amp; waiting</label><input type="number" data-k="watchFps" min="0.5" max="10" step="0.5"></div>
+    <div><label>Checks/sec while a card is settling</label><input type="number" data-k="activeFps" min="1" max="15"></div>
+  </div>
+  <div class="hint">Show mode turns the screen black and stops drawing the video, which saves power and heat.</div>
+</details>
+
+<details>
+  <summary>About / reset</summary>
+  <div class="mono hint" id="about"></div>
+  <button id="btnResetAll">Reset all settings</button>
+</details>
+
+<div id="show"><div class="tiny" id="showTxt"></div></div>
+
+<script src="app.js"></script>
+</body>
+</html>

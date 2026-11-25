@@ -18,10 +18,14 @@
  *   GET  /   -> health check: { ok, hasKey, hasToken, tokenOk }
  *   POST /   -> body JSON:
  *     { image: "<base64 or data: URL>", mimeType: "image/jpeg",
- *       prompt: "...", model?: "...", generationConfig?: {...}, timeoutMs?: 15000 }
- *     returns { text, model, finishReason, geminiMs, usage }
+ *       prompt: "...", models?: ["first-choice", "backup"], generationConfig?: {...},
+ *       timeoutMs?: 15000 }
+ *     Tries each model in turn if one is busy or fails. If a model rejects the
+ *     optional settings ("invalid argument"), it retries with basic settings.
+ *     returns { text, model, finishReason, geminiMs, usage, attempts }
  */
 
+const WORKER_VERSION = 2;
 const DEFAULT_MODEL = 'gemini-flash-latest';
 const MAX_BODY_BYTES = 15 * 1024 * 1024; // ~15 MB of JSON (base64 photo)
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/';
@@ -55,6 +59,7 @@ export default {
       return json({
         ok: true,
         service: 'card-reader-proxy',
+        version: WORKER_VERSION,
         hasKey: !!env.GEMINI_API_KEY,
         hasToken: !!env.APP_TOKEN,
         tokenOk,
@@ -87,62 +92,99 @@ export default {
     if (!/^image\/(jpeg|png|webp)$/.test(mimeType)) return json({ error: 'Unsupported image type' }, 400);
 
     const prompt = String(body.prompt || 'Transcribe all text in this image exactly.').slice(0, 4000);
-    const model = String(body.model || env.GEMINI_MODEL || DEFAULT_MODEL);
-    if (!/^[a-z0-9][a-z0-9.\-]{1,63}$/i.test(model)) return json({ error: 'Bad model name' }, 400);
+
+    // Models to try, in order. "models" (list) wins over "model" (single).
+    let models = Array.isArray(body.models) ? body.models : [body.model || env.GEMINI_MODEL || DEFAULT_MODEL];
+    models = models.map((m) => String(m || '').trim()).filter(Boolean).slice(0, 4);
+    if (!models.length) models = [env.GEMINI_MODEL || DEFAULT_MODEL];
+    for (const m of models) {
+      if (!/^[a-z0-9][a-z0-9.\-]{1,63}$/i.test(m)) return json({ error: 'Bad model name: ' + m }, 400);
+    }
 
     const generationConfig = cleanGenConfig(body.generationConfig);
     const timeoutMs = clamp(Number(body.timeoutMs) || 20000, 2000, 60000);
+    const deadline = Date.now() + timeoutMs;
+    const imagePart = { inline_data: { mime_type: mimeType, data: image } };
 
-    const payload = {
-      contents: [{
-        role: 'user',
-        parts: [
-          { inline_data: { mime_type: mimeType, data: image } },
-          { text: prompt },
-        ],
-      }],
-      generationConfig,
-    };
-
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     const t0 = Date.now();
-    let res, data;
-    try {
-      res = await fetch(GEMINI_BASE + encodeURIComponent(model) + ':generateContent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
-        body: JSON.stringify(payload),
-        signal: ctrl.signal,
-      });
-      data = await res.json().catch(() => ({}));
-    } catch (e) {
-      clearTimeout(timer);
-      const timedOut = e && e.name === 'AbortError';
-      return json({ error: timedOut ? 'Gemini timed out' : 'Could not reach Gemini', geminiMs: Date.now() - t0 }, 504);
+    const attempts = [];
+    for (const model of models) {
+      // Try with the full settings; if Gemini says "invalid argument" (400),
+      // retry once with only the basic settings (some models reject extras).
+      for (const cfg of [generationConfig, basicGenConfig(generationConfig)]) {
+        const remaining = deadline - Date.now();
+        if (remaining < 500) break;
+        const r = await callGemini(env.GEMINI_API_KEY, model, imagePart, prompt, cfg, remaining);
+        attempts.push({ model, status: r.status, ms: r.ms, error: r.error || undefined, simplified: cfg !== generationConfig || undefined });
+        if (r.ok) {
+          return json({
+            text: r.text,
+            model,
+            finishReason: r.finishReason,
+            blockReason: r.blockReason,
+            geminiMs: Date.now() - t0,
+            usage: r.usage,
+            attempts,
+          });
+        }
+        if (r.status === 400 && cfg === generationConfig && JSON.stringify(cfg) !== JSON.stringify(basicGenConfig(cfg))) continue;
+        break; // busy / timeout / other error -> next model
+      }
+      if (deadline - Date.now() < 500) break;
     }
-    clearTimeout(timer);
-    const geminiMs = Date.now() - t0;
 
+    const last = attempts[attempts.length - 1] || {};
+    const timedOut = last.status === 504;
+    return json({
+      error: last.error || 'No model answered',
+      status: last.status || 0,
+      geminiMs: Date.now() - t0,
+      attempts,
+    }, timedOut ? 504 : 502);
+  },
+};
+
+async function callGemini(key, model, imagePart, prompt, generationConfig, timeoutMs) {
+  const payload = {
+    contents: [{ role: 'user', parts: [imagePart, { text: prompt }] }],
+    generationConfig,
+  };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const t0 = Date.now();
+  try {
+    const res = await fetch(GEMINI_BASE + encodeURIComponent(model) + ':generateContent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+      body: JSON.stringify(payload),
+      signal: ctrl.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    const ms = Date.now() - t0;
     if (!res.ok) {
       const msg = (data && data.error && data.error.message) || ('Gemini HTTP ' + res.status);
-      return json({ error: msg, status: res.status, geminiMs, model }, 502);
+      return { ok: false, status: res.status, error: msg, ms };
     }
-
     const cand = (data.candidates || [])[0] || {};
     const parts = (cand.content && cand.content.parts) || [];
     const text = parts.filter((p) => p.text && !p.thought).map((p) => p.text).join('').trim();
-
-    return json({
-      text,
-      model,
+    return {
+      ok: true, status: 200, ms, text,
       finishReason: cand.finishReason || null,
       blockReason: (data.promptFeedback && data.promptFeedback.blockReason) || null,
-      geminiMs,
       usage: data.usageMetadata || null,
-    });
-  },
-};
+    };
+  } catch (e) {
+    const timedOut = e && e.name === 'AbortError';
+    return { ok: false, status: timedOut ? 504 : 0, error: timedOut ? 'Gemini timed out' : 'Could not reach Gemini', ms: Date.now() - t0 };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function basicGenConfig(cfg) {
+  return { temperature: cfg.temperature, maxOutputTokens: cfg.maxOutputTokens };
+}
 
 // Only pass through settings we understand, so the app can't send anything odd.
 function cleanGenConfig(gc) {
