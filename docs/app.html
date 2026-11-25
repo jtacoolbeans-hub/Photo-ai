@@ -12,85 +12,131 @@
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <title>Card Assistant</title>
 <style>
-  :root { color-scheme: dark; --bg:#0b0b0b; --fg:#eee; --mut:#8a8a8a; --acc:#4fa3ff; --ok:#4caf50; --warn:#ffb300; --bad:#ff5252; --card:#181818; }
+  :root { color-scheme: dark; --bg:#0a0a0a; --fg:#f2f2f2; --mut:#8d8d92; --acc:#4fa3ff; --ok:#34c759; --warn:#ffb340;
+          --bad:#ff453a; --card:#161618; --card2:#1f1f22; --line:#2c2c2e; --state:#555; }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { background:var(--bg); }
-  body { margin:0; padding:calc(env(safe-area-inset-top) + 10px) 12px calc(env(safe-area-inset-bottom) + 60px);
-         color:var(--fg); font:16px -apple-system, system-ui, sans-serif; }
-  h2 { font-size:16px; margin:0; color:var(--acc); }
-  section, details { background:var(--card); border-radius:12px; padding:12px; margin-bottom:10px; }
-  details > summary { font-weight:600; color:var(--acc); list-style:none; cursor:pointer; }
-  details > summary::before { content:'▸ '; } details[open] > summary::before { content:'▾ '; }
-  label { display:block; margin:10px 0 4px; color:var(--mut); font-size:14px; }
-  label.chk { color:var(--fg); font-size:15px; }
-  .hint { color:var(--mut); font-size:13px; margin-top:3px; }
+  body { margin:0; padding:0 12px calc(env(safe-area-inset-bottom) + 60px); color:var(--fg);
+         font:16px -apple-system, system-ui, sans-serif; }
+  /* status bar that stays at the top while you scroll */
+  #top { position:sticky; top:0; z-index:20; margin:0 -12px 10px; padding:calc(env(safe-area-inset-top) + 10px) 14px 10px;
+         background:rgba(10,10,10,.85); -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px);
+         border-bottom:1px solid var(--line); }
+  #state { display:flex; align-items:center; gap:10px; font-size:21px; font-weight:700; }
+  #dot { width:14px; height:14px; border-radius:50%; background:var(--state); flex:0 0 auto;
+         box-shadow:0 0 0 4px color-mix(in srgb, var(--state) 25%, transparent); }
+  #sub { color:var(--mut); font-size:13px; margin-top:3px; min-height:16px; }
+  section, details { background:var(--card); border-radius:16px; padding:12px; margin-bottom:10px; border:1px solid var(--line); }
+  h2 { font-size:13px; margin:0 0 8px; color:var(--mut); text-transform:uppercase; letter-spacing:.06em; font-weight:600; }
+  .settings-title { margin:22px 4px 8px; }
+  details > summary { font-weight:600; list-style:none; cursor:pointer; display:flex; justify-content:space-between; }
+  details > summary::-webkit-details-marker { display:none; }
+  details > summary::after { content:'›'; color:var(--mut); font-size:20px; line-height:1; transition:transform .2s; }
+  details[open] > summary::after { transform:rotate(90deg); }
+  label { display:block; margin:12px 0 4px; color:var(--mut); font-size:14px; }
+  label.chk { color:var(--fg); font-size:15px; display:flex; gap:8px; align-items:flex-start; }
+  label.chk input { width:20px; height:20px; flex:0 0 auto; margin:0; }
+  .hint { color:var(--mut); font-size:13px; margin-top:4px; }
   input[type=text], input[type=password], input[type=number], select, textarea {
-    width:100%; font-size:16px; padding:10px; border-radius:8px; border:1px solid #333; background:#000; color:var(--fg); }
+    width:100%; font-size:16px; padding:11px; border-radius:10px; border:1px solid var(--line); background:#000; color:var(--fg); }
   textarea { min-height:80px; }
   input[type=range] { width:100%; }
-  button { font-size:16px; padding:12px 14px; border-radius:10px; border:0; background:#2a2a2a; color:var(--fg);
+  button { font-size:15px; padding:11px 14px; border-radius:12px; border:0; background:var(--card2); color:var(--fg);
            font-weight:600; margin:6px 6px 0 0; }
-  button.pri { background:var(--acc); color:#000; }
-  button.big { font-size:18px; padding:16px; flex:1 1 45%; margin:0; }
   button:disabled { opacity:.35; }
-  .grid { display:flex; flex-wrap:wrap; gap:8px; }
+  button:active { transform:scale(.97); }
   .row { display:flex; gap:8px; flex-wrap:wrap; } .row > * { flex:1 1 140px; }
   .mono { font-family: ui-monospace, Menlo, monospace; font-size:13px; white-space:pre-wrap; word-break:break-word; }
-  #state { display:flex; align-items:center; gap:10px; font-size:22px; font-weight:700; }
-  #dot { width:16px; height:16px; border-radius:50%; background:#555; flex:0 0 auto; }
-  #sub { color:var(--mut); font-size:13px; margin-top:4px; }
-  #stage { position:relative; width:100%; background:#000; border-radius:8px; overflow:hidden; margin-top:8px; }
-  #stage.drawing { touch-action:none; outline:2px dashed var(--warn); }
-  #video { display:block; width:100%; height:auto; }
-  #cropBox { position:absolute; border:2px solid #ff0; box-shadow:0 0 0 9999px rgba(0,0,0,.45); pointer-events:none; }
-  .meters { display:grid; grid-template-columns: repeat(4, 1fr); gap:6px; margin-top:8px; text-align:center; }
-  .meters div { background:#000; border-radius:8px; padding:6px 2px; }
-  .meters b { display:block; font-size:18px; } .meters span { font-size:11px; color:var(--mut); }
-  .bar { height:6px; background:#333; border-radius:3px; overflow:hidden; margin-top:4px; }
-  .bar i { display:block; height:100%; width:0; background:var(--acc); }
-  #lastQ { color:var(--mut); } #lastA { font-size:18px; margin-top:6px; }
-  #show { position:fixed; inset:0; background:#000; z-index:50; display:none; }
-  #show .tiny { position:absolute; left:12px; bottom:calc(env(safe-area-inset-bottom) + 10px); color:#222; font-size:12px; }
-  body.showmode #video { position:fixed; width:2px !important; height:2px; opacity:0.01; top:0; left:0; }
   a { color:var(--acc); }
+
+  /* live view + controls, kept together */
+  #live { padding:8px; }
+  #stage { position:relative; width:100%; min-height:200px; background:#000; border-radius:12px; overflow:hidden;
+           border:2px solid var(--state); transition:border-color .3s; }
+  #stage.drawing { touch-action:none; border-color:var(--warn); border-style:dashed; }
+  #video { display:block; width:100%; height:auto; }
+  /* once running: shrink the picture so the buttons stay on screen right below it */
+  #stage.on { width:fit-content; max-width:100%; min-height:0; margin:0 auto; }
+  #stage.on #video { width:auto; height:auto; max-width:100%; max-height:calc(100vh - 480px); min-height:170px; }
+  #stage:not(.on) #cropBox { display:none; }
+  #placeholder { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center;
+                 color:var(--mut); padding:20px; font-size:15px; }
+  #drawHint { position:absolute; top:8px; left:8px; right:8px; text-align:center; background:rgba(0,0,0,.7); color:var(--warn);
+              border-radius:8px; padding:6px; font-size:13px; display:none; pointer-events:none; }
+  #stage.drawing #drawHint { display:block; }
+  #cropBox { position:absolute; border:2px solid #ffd60a; border-radius:4px; box-shadow:0 0 0 9999px rgba(0,0,0,.45); pointer-events:none; }
+  .meters { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin-top:8px; text-align:center; }
+  .meters > div { background:#000; border-radius:10px; padding:5px 2px 6px; }
+  .meters b { display:block; font-size:16px; font-variant-numeric:tabular-nums; }
+  .meters span { font-size:10px; color:#bbb; text-transform:uppercase; letter-spacing:.04em; }
+  .bar { height:4px; background:rgba(255,255,255,.15); border-radius:2px; overflow:hidden; margin:3px 6px 0; }
+  .bar i { display:block; height:100%; width:0; background:var(--acc); transition:width .2s; }
+  #camInfo { margin:6px 2px 0; }
+  .controls { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px; }
+  .controls button { margin:0; padding:16px 8px; font-size:17px; border-radius:14px; display:flex; flex-direction:column;
+                     align-items:center; gap:2px; }
+  .controls button small { font-size:11px; font-weight:500; color:var(--mut); }
+  .controls button.pri { background:var(--acc); color:#000; } .controls button.pri small { color:#00264d; }
+  .controls button.armed { background:var(--ok); color:#000; } .controls button.armed small { color:#063; }
+  .controls button.running { background:var(--card2); color:var(--ok); }
+  .tools { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin-top:8px; }
+  .tools button, .tools a { margin:0; padding:10px 4px; font-size:12px; border-radius:12px; background:var(--card2); color:var(--fg);
+                            text-decoration:none; text-align:center; font-weight:600; display:flex; flex-direction:column; gap:3px; align-items:center; }
+  .tools .ico { font-size:18px; line-height:1; }
+
+  /* last answer */
+  #answerCard { border-left:4px solid var(--acc); }
+  #lastQ { color:var(--mut); font-size:14px; } #lastA { font-size:19px; font-weight:600; margin-top:6px; line-height:1.35; }
+
+  #show { position:fixed; inset:0; background:#000; z-index:50; display:none; }
+  #show .tiny { position:absolute; left:12px; bottom:calc(env(safe-area-inset-bottom) + 10px); color:#1c1c1c; font-size:12px; }
+  body.showmode #video { position:fixed; width:2px !important; height:2px; opacity:0.01; top:0; left:0; }
 </style>
 </head>
 <body>
 
-<section>
+<header id="top">
   <div id="state"><span id="dot"></span><span id="stateText">Not started</span></div>
   <div id="sub">Tap START to begin.</div>
-  <div class="grid" style="margin-top:12px">
-    <button id="btnStart" class="big pri">START</button>
-    <button id="btnArm" class="big" disabled>ARM</button>
-    <button id="btnForce" class="big" disabled>CAPTURE NOW</button>
-    <button id="btnRepeat" class="big" disabled>REPEAT</button>
-    <button id="btnShow" class="big" disabled>SHOW MODE (black screen)</button>
-    <a href="log.html" class="big" style="flex:1 1 45%"><button class="big" style="width:100%">CAPTURE LOG</button></a>
-  </div>
-</section>
+</header>
 
-<section>
-  <h2>Camera view</h2>
-  <div id="stage"><video id="video" playsinline muted autoplay></video><div id="cropBox"></div></div>
+<section id="live">
+  <div id="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <div id="placeholder">Camera view appears here after you tap START</div>
+    <div id="cropBox"></div>
+    <div id="drawHint">Drag on the picture to draw the crop box</div>
+  </div>
   <div class="meters">
     <div><b id="mMotion">–</b><span>motion</span><div class="bar"><i id="barMotion"></i></div></div>
-    <div><b id="mSharp">–</b><span>sharpness</span><div class="bar"><i id="barSharp"></i></div></div>
-    <div><b id="mStill">–</b><span>still frames</span></div>
-    <div><b id="mFps">–</b><span>checks/sec</span></div>
+    <div><b id="mSharp">–</b><span>sharp</span><div class="bar"><i id="barSharp"></i></div></div>
+    <div><b id="mStill">–</b><span>still</span></div>
+    <div><b id="mFps">–</b><span>checks/s</span></div>
   </div>
   <div class="hint" id="camInfo"></div>
-  <button id="btnDraw">Draw crop box</button>
-  <button id="btnCropReset">Full frame</button>
+
+  <div class="controls">
+    <button id="btnStart" class="pri">▶ START<small>camera, sound, earbuds</small></button>
+    <button id="btnArm" disabled>● ARM<small>earbud: single press</small></button>
+    <button id="btnForce" disabled>◎ CAPTURE NOW<small>earbud: double press</small></button>
+    <button id="btnRepeat" disabled>↻ REPEAT<small>earbud: triple press</small></button>
+  </div>
+  <div class="tools">
+    <button id="btnDraw"><span class="ico">⬚</span><span id="drawLbl">Crop box</span></button>
+    <button id="btnCropReset"><span class="ico">⛶</span>Full frame</button>
+    <button id="btnShow" disabled><span class="ico">◐</span>Show mode</button>
+    <a href="log.html"><span class="ico">☰</span>Log</a>
+  </div>
 </section>
 
-<section>
+<section id="answerCard">
   <h2>Last answer</h2>
-  <div id="lastQ" style="margin-top:6px">–</div>
+  <div id="lastQ">–</div>
   <div id="lastA">–</div>
   <div class="hint" id="lastInfo"></div>
 </section>
 
+<h2 class="settings-title">Settings</h2>
 <details>
   <summary>Connection</summary>
   <label>Worker URL</label>

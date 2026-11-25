@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const MIN_WORKER_VERSION = 2;
 
 const DEFAULT_PROMPT =
@@ -305,7 +305,7 @@ function drawCropBox() {
 (function cropDrawing() {
   const stage = $('stage'); let drawing = false, start = null;
   const pos = (e) => { const r = stage.getBoundingClientRect(); return { x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) }; };
-  $('btnDraw').onclick = () => { drawing = !drawing; stage.classList.toggle('drawing', drawing); $('btnDraw').textContent = drawing ? 'Done drawing' : 'Draw crop box'; };
+  $('btnDraw').onclick = () => { drawing = !drawing; stage.classList.toggle('drawing', drawing); $('drawLbl').textContent = drawing ? 'Done' : 'Crop box'; };
   $('btnCropReset').onclick = () => { S.useCrop = false; saveSettings(); document.querySelector('[data-k=useCrop]').checked = false; drawCropBox(); prevGrey = null; };
   stage.addEventListener('pointerdown', (e) => { if (!drawing) return; start = pos(e); stage.setPointerCapture(e.pointerId); e.preventDefault(); });
   stage.addEventListener('pointermove', (e) => {
@@ -383,7 +383,8 @@ function setArmed(on) {
   armed = on;
   if (on) { phase = 'watch'; stillCount = 0; collect = null; needChange = false; noneRetries = 0; tone('ready'); }
   else { if (phase !== 'busy') phase = 'idle'; collect = null; tone('disarmed'); }
-  $('btnArm').textContent = armed ? 'DISARM' : 'ARM';
+  $('btnArm').innerHTML = armed ? '■ DISARM<small>armed — watching</small>' : '● ARM<small>earbud: single press</small>';
+  $('btnArm').classList.toggle('armed', armed);
   setSub();
 }
 
@@ -564,7 +565,7 @@ function renderState() {
   const st = phase === 'busy' ? shownState : (running ? phase : 'off');
   const [txt, col] = STATE_STYLE[st] || [st, '#555'];
   if (txt === lastStateTxt) return;
-  $('stateText').textContent = txt; $('dot').style.background = col;
+  $('stateText').textContent = txt; document.documentElement.style.setProperty('--state', col);
   if (txt === lastStateTxt) return;
   lastStateTxt = txt;
   $('showTxt').textContent = txt;
@@ -614,7 +615,10 @@ $('btnStart').onclick = async () => {
   running = true; phase = 'idle';
   await requestWakeLock();
   ['btnArm', 'btnForce', 'btnRepeat', 'btnShow'].forEach((id) => { $(id).disabled = false; });
-  $('btnStart').textContent = 'RUNNING';
+  $('btnStart').innerHTML = '● RUNNING<small>camera on</small>';
+  $('btnStart').classList.remove('pri'); $('btnStart').classList.add('running');
+  $('placeholder').style.display = 'none';
+  $('stage').classList.add('on');
   drawCropBox();
   await tone('start');
   if (S.autoArm) setArmed(true);
