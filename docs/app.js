@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 const MIN_WORKER_VERSION = 2;
 
 // The first version of the prompt. Phones that saved it get the new one automatically.
@@ -26,7 +26,7 @@ const OLD_PROMPT_V1 =
   'A: <a short spoken answer, one or two plain sentences, no lists, symbols or markdown>\n' +
   'If you cannot read the question with confidence, reply with just: NONE';
 
-const PROMPT_QUESTION =
+const OLD_QUESTION_V2 =
   'The photo shows a paper card with a printed question. A stage performer will hear your answer through an earbud.\n' +
   'Find the question. If more than one question is visible, use the first one, nearest the top.\n' +
   'Reply in exactly this format and nothing else:\n' +
@@ -36,7 +36,7 @@ const PROMPT_QUESTION =
   'Reply with just the word NONE only if no question can be read at all.';
 
 // General-purpose: respond to whatever is on the card, not just questions.
-const PROMPT_ANYTHING =
+const OLD_ANYTHING_V3 =
   "The photo shows a card held up during a live show. Your reply is spoken into the performer's earbud, so it must be quick and natural.\n" +
   'Whatever is on the card — a question, a word, a name, a topic, a statement, a number, a prompt or an instruction — respond to it directly ' +
   'and helpfully, like a quick-witted friend. If it asks something, answer it. If it is a topic, name or word, say something short, ' +
@@ -46,6 +46,22 @@ const PROMPT_ANYTHING =
   'A: <your reply to be spoken aloud: one to three short sentences, plain words only, no lists, symbols or markdown>\n' +
   'Always give your best reply, even if the print is small or slightly unclear. ' +
   'Reply with just the word NONE only if nothing on the card can be read at all.';
+const MULTI_FORMAT =
+  'If the card or page has several questions or items, handle EVERY one, in order from top to bottom.\n' +
+  'Reply in exactly this format and nothing else, one pair per item (just Q1/A1 if there is only one):\n' +
+  'Q1: <item 1, in at most 12 words>\n' +
+  'A1: <your reply to item 1: one to three short sentences to be spoken aloud, plain words only, no lists, symbols or markdown>\n' +
+  'Q2: <item 2>\nA2: <reply to item 2>\n(and so on)\n' +
+  'Always give your best reply, even if the print is small or slightly unclear. ' +
+  'Reply with just the word NONE only if nothing on the card can be read at all.';
+const PROMPT_ANYTHING =
+  "The photo shows a card or page held up during a live show. Your reply is spoken into the performer's earbud, so it must be quick and natural.\n" +
+  'Whatever is written — a question, a word, a name, a topic, a statement, a number, a prompt or an instruction — respond to it directly ' +
+  'and helpfully, like a quick-witted friend. If it asks something, answer it. If it is a topic, name or word, say something short, ' +
+  'interesting or funny about it. If it is an instruction, carry it out.\n' + MULTI_FORMAT;
+const PROMPT_QUESTION =
+  'The photo shows a paper card or page with printed questions. A stage performer will hear your answers through an earbud.\n' +
+  'Answer each question correctly and briefly.\n' + MULTI_FORMAT;
 const DEFAULT_PROMPT = PROMPT_ANYTHING;
 const PROMPTS = { anything: PROMPT_ANYTHING, question: PROMPT_QUESTION };
 
@@ -60,8 +76,9 @@ const CUE_KEYS = ['start', 'ready', 'disarmed', 'captured', 'thinking', 'answer'
 const DEFAULTS = {
   workerUrl: '', token: '',
   models: 'gemini-3.5-flash, gemini-flash-latest',
-  mediaResolution: 'MEDIA_RESOLUTION_HIGH', thinking: 'minimal', maxTokens: 1024,
-  prompt: DEFAULT_PROMPT, style: '',
+  mediaResolution: 'MEDIA_RESOLUTION_HIGH', thinking: 'minimal', maxTokens: 2048,
+  prompt: DEFAULT_PROMPT, style: '', allItems: true,
+  voiceEngine: 'device', ttsVoice: 'Kore', ttsModel: 'gemini-2.5-flash-preview-tts', pauseLoopForSpeech: false, audioSessionMode: 'playback',
   maxSide: 2048, jpegQuality: 85,
   timeoutSec: 8, stallLine: 'Great question. Give me just a second with that one.',
   lateAnswer: true, lateSec: 15, retryNone: 1,
@@ -76,7 +93,7 @@ for (const k of CUE_KEYS) DEFAULTS['cue_' + k] = 'tone';
 
 // ---------------------------------------------------------------- settings
 const LS_KEY = 'cardAssistant.settings.v1';
-const SETTINGS_VER = 3;
+const SETTINGS_VER = 4;
 let S = loadSettings();
 function loadSettings() {
   let saved = {};
@@ -88,7 +105,8 @@ function loadSettings() {
       const old = { thinking: '', res: 'max', stillFrames: 3, windowFrames: 4, watchFps: 3, activeFps: 8 };
       for (const k in old) if (saved[k] === old[k]) delete saved[k];
     }
-    if (saved.prompt === OLD_PROMPT_V1 || saved.prompt === PROMPT_QUESTION) delete saved.prompt;
+    if ([OLD_PROMPT_V1, OLD_QUESTION_V2, OLD_ANYTHING_V3].includes(saved.prompt)) delete saved.prompt;
+    if ((saved.v || 1) < 4 && saved.maxTokens === 1024) delete saved.maxTokens; // longer pages need room for many answers
     saved.v = SETTINGS_VER;
     try { localStorage.setItem(LS_KEY, JSON.stringify(saved)); } catch {}
   }
@@ -117,6 +135,8 @@ function onSettingChanged(k) {
   if (k === 'camId' || k === 'res' || k === 'camFps') { safeMode = false; if (running) startCamera().catch((e) => { camNote = 'Camera error: ' + e.message; setSub(); }); }
   if (k === 'torch') applyTorch();
   if (k === 'useCrop') drawCropBox();
+  if (k === 'stallLine' || k === 'voiceEngine' || k === 'ttsVoice' || k === 'ttsModel') { geminiVoiceDown = false; voiceFails = 0; prewarmVoice(); }
+  if (k === 'audioSessionMode') setAudioSession();
 }
 
 // ---------------------------------------------------------------- capture log (IndexedDB)
@@ -175,6 +195,10 @@ function tone(name) {
   if (CAN_VIBRATE && (mode === 'vibrate' || mode === 'both')) { try { navigator.vibrate(VIBES[name] || [50]); } catch {} }
   const seq = TONES[name];
   if (mode === 'off' || mode === 'vibrate' || !seq || !(S.toneVol > 0)) return Promise.resolve();
+  return beepNow(name);
+}
+function beepNow(name) {
+  const seq = TONES[name]; if (!seq) return Promise.resolve();
   let total = 0;
   try {
     const c = audioCtx(); let t = c.currentTime + 0.02;
@@ -196,13 +220,51 @@ function tone(name) {
 // ---------------------------------------------------------------- speech
 let speaking = false, speechChain = Promise.resolve(), speechNote = '';
 const liveUtterances = new Set(); // keep references: Safari can drop an utterance that gets garbage-collected mid-speech
+let loopPausedForSpeech = false;
+
+// Queue something to be said. Long text is split into sentences (iOS can cut off long utterances).
+function cleanSpeech(text) { return String(text || '').replace(/[*_#`>]/g, '').replace(/\s+/g, ' ').trim(); }
 function speak(text) {
-  text = String(text || '').replace(/[*_#`>]/g, '').trim();
+  text = cleanSpeech(text);
   if (!text) return Promise.resolve();
-  speechChain = speechChain.then(() => new Promise((resolve) => {
-    let done = false, started = false, tries = 0, cur = null, kick = null;
+  if (S.voiceEngine === 'gemini' && S.workerUrl && !geminiVoiceDown) {
+    const buf = geminiVoiceBuffer(text); // starts generating NOW, while anything earlier is still being spoken
+    buf.catch(() => {});
+    speechChain = speechChain.then(async () => {
+      speaking = true; setSub();
+      try { await playBuffer(await buf); voiceFails = 0; if (/Gemini voice/.test(speechNote)) speechNote = ''; }
+      catch (e) {
+        voiceFails++; if (voiceFails >= 2) geminiVoiceDown = true;
+        speechNote = 'Gemini voice failed (' + e.message + ') — used the iPhone voice instead';
+        for (const ch of splitSpeech(text)) await speakDeviceNow(ch);
+      }
+      speaking = false; setSub();
+    });
+    return speechChain;
+  }
+  const chunks = splitSpeech(text);
+  speechChain = speechChain.then(async () => { for (const ch of chunks) await speakDeviceNow(ch); });
+  return speechChain;
+}
+function splitSpeech(text) {
+  const parts = text.replace(/([.!?])\s+/g, '$1\u0001').split('\u0001'); // split at sentence ends, not inside "7.21"
+  const out = []; let cur = '';
+  for (const p of parts) { if (cur && (cur + ' ' + p).length > 220) { out.push(cur); cur = p; } else cur = cur ? cur + ' ' + p : p; }
+  if (cur) out.push(cur);
+  return out.flatMap((x) => x.length <= 300 ? [x] : (x.match(/.{1,280}(\s|$)/g) || [x]).map((y) => y.trim()).filter(Boolean));
+}
+
+// The iPhone's own voice (speechSynthesis). Resolves with what happened, for the audio check.
+function speakDeviceNow(text) {
+  return new Promise((resolve) => {
+    let done = false, started = false, tries = 0, cur = null, kick = null, errName = '';
+    if (S.pauseLoopForSpeech && keepAlive && !keepAlive.paused) { loopPausedForSpeech = true; keepAlive.pause(); }
     const total = setTimeout(() => finish(), 7000 + text.length * 120 / (S.rate || 1));
-    const finish = () => { if (done) return; done = true; speaking = false; clearTimeout(total); clearTimeout(kick); setSub(); resolve(); };
+    const finish = () => {
+      if (done) return; done = true; speaking = false; clearTimeout(total); clearTimeout(kick);
+      if (loopPausedForSpeech) { loopPausedForSpeech = false; if (running && keepAlive) keepAlive.play().catch(() => {}); }
+      setSub(); resolve({ started, error: errName });
+    };
     const say = () => {
       tries++;
       const u = cur = new SpeechSynthesisUtterance(text);
@@ -211,35 +273,79 @@ function speak(text) {
       if (v) u.voice = v;
       u.lang = (v && v.lang) || 'en-US';
       u.rate = S.rate || 1; u.volume = 1;
-      u.onstart = () => { if (cur !== u) return; started = true; speechNote = ''; clearTimeout(kick); };
+      u.onstart = () => { if (cur !== u) return; started = true; if (/not starting/.test(speechNote)) speechNote = ''; clearTimeout(kick); };
       const end = () => { liveUtterances.delete(u); if (cur === u) finish(); };
-      u.onend = end; u.onerror = end;
-      try { if (speechSynthesis.paused) speechSynthesis.resume(); speechSynthesis.speak(u); } catch { finish(); return; }
+      u.onend = end; u.onerror = (e) => { if (cur === u) errName = (e && e.error) || 'error'; end(); };
+      try { if (speechSynthesis.paused) speechSynthesis.resume(); speechSynthesis.speak(u); } catch (e) { errName = e.message; finish(); return; }
       // iOS sometimes swallows speech without any error. If nothing starts, reset it and try once more.
       kick = setTimeout(() => {
         if (started || done) return;
         if (tries < 2) { try { speechSynthesis.cancel(); } catch {} cur = null; setTimeout(say, 200); }
-        else { speechNote = 'Speech is not starting — check the ringer switch and volume, then tap Test voice'; setSub(); }
+        else { speechNote = 'Speech is not starting — run Speech & sounds → Audio check'; setSub(); }
       }, 2000);
     };
     speaking = true; setSub(); say();
-  }));
-  return speechChain;
+  });
 }
+
+// Gemini voice: the Worker returns a WAV file; we decode it and play it through Web Audio (same route as the beeps).
+const voiceCache = new Map(); // text -> Promise<AudioBuffer>, so the stall line and repeats are instant
+let voiceFails = 0, geminiVoiceDown = false, lastTtsMs = 0;
+function geminiVoiceBuffer(text) {
+  text = cleanSpeech(text);
+  const key = S.ttsVoice + '|' + S.ttsModel + '|' + text;
+  if (voiceCache.has(key)) return voiceCache.get(key);
+  const p = (async () => {
+    const t0 = performance.now(), ctrl = new AbortController(), tm = setTimeout(() => ctrl.abort(), 20000);
+    try {
+      const r = await fetch(S.workerUrl.trim().replace(/\/$/, ''), {
+        method: 'POST', signal: ctrl.signal,
+        headers: { 'Content-Type': 'application/json', 'X-App-Token': S.token.trim() },
+        body: JSON.stringify({ tts: text, voice: S.ttsVoice, model: S.ttsModel }),
+      });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || 'HTTP ' + r.status); }
+      if (!/audio/.test(r.headers.get('Content-Type') || '')) throw new Error('Worker is out of date (no voice support) — paste the new proxy.js');
+      const ab = await r.arrayBuffer();
+      if (ab.byteLength < 100) throw new Error('empty audio');
+      const buf = await new Promise((res, rej) => audioCtx().decodeAudioData(ab, res, rej));
+      lastTtsMs = Math.round(performance.now() - t0);
+      return buf;
+    } catch (e) { throw e.name === 'AbortError' ? new Error('timed out') : e; }
+    finally { clearTimeout(tm); }
+  })();
+  voiceCache.set(key, p);
+  p.catch(() => voiceCache.delete(key));
+  if (voiceCache.size > 60) voiceCache.delete(voiceCache.keys().next().value);
+  return p;
+}
+function playBuffer(buf) {
+  return new Promise((resolve) => {
+    const c = audioCtx(), src = c.createBufferSource();
+    src.buffer = buf; src.connect(c.destination);
+    const guard = setTimeout(resolve, buf.duration * 1000 + 1500);
+    src.onended = () => { clearTimeout(guard); resolve(); };
+    src.start();
+  });
+}
+function prewarmVoice() { // make the lines we know in advance, so they play instantly
+  if (S.voiceEngine !== 'gemini' || !S.workerUrl || !actx) return;
+  geminiVoiceBuffer(S.stallLine).catch(() => {});
+}
+
 // Must run inside a tap or key press: it "unlocks" speech and sound on iOS.
 function unlockSpeech() {
   try {
     const u = new SpeechSynthesisUtterance('Ready');
     const v = speechSynthesis.getVoices().find((x) => x.voiceURI === S.voiceURI);
     if (v) u.voice = v;
-    u.lang = (v && v.lang) || 'en-US'; u.volume = S.sayReady ? 1 : 0;
+    u.lang = (v && v.lang) || 'en-US'; u.volume = (S.sayReady && S.voiceEngine !== 'gemini') ? 1 : 0;
     liveUtterances.add(u); u.onend = u.onerror = () => liveUtterances.delete(u);
     speechSynthesis.speak(u);
   } catch {}
   setAudioSession();
 }
-function setAudioSession() { // lets sound and speech play even with the ringer switch on silent (iOS 16.4+)
-  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch {}
+function setAudioSession() { // "playback" lets sound play even with the ringer switch on silent (iOS 16.4+)
+  try { if (navigator.audioSession) navigator.audioSession.type = S.audioSessionMode === 'auto' ? 'auto' : 'playback'; } catch {}
 }
 function updateSpeechInfo() {
   $('speechInfo').textContent = 'Voices on this phone: ' + speechSynthesis.getVoices().length + (speechNote ? '\n⚠ ' + speechNote : '');
@@ -273,7 +379,7 @@ function setupMediaSession() {
   if (!keepAlive) {
     keepAlive = new Audio(silentWavUrl());
     keepAlive.loop = true;
-    keepAlive.addEventListener('pause', () => { if (running) setTimeout(() => keepAlive.play().catch(() => {}), 300); });
+    keepAlive.addEventListener('pause', () => { if (running && !loopPausedForSpeech) setTimeout(() => { if (!loopPausedForSpeech) keepAlive.play().catch(() => {}); }, 300); });
   }
   keepAlive.play().catch(() => {});
   const ms = navigator.mediaSession;
@@ -683,7 +789,9 @@ async function runCapture(c) {
   } else if (c.source === 'auto' && parsed.q && parsed.q === last.q && !stalled) { entry.status = 'duplicate'; next = 'skip'; }
   else {
     entry.status = stalled ? 'late-answer' : 'answer'; next = 'speak';
-    last = { q: parsed.q, a: parsed.a, text: res.text };
+    entry.items = parsed.items.length;
+    last = { q: parsed.q, a: parsed.a, items: parsed.items, text: res.text };
+    if (S.voiceEngine === 'gemini') itemTexts(parsed.items).forEach((t) => geminiVoiceBuffer(t).catch(() => {})); // start making the voice now
   }
   logCapture(entry); // logged BEFORE speaking, so it is saved even if something interrupts the speech
   showLast(entry);
@@ -694,8 +802,7 @@ async function runCapture(c) {
   else {
     await speechChain; // let the stall line finish first
     await tone('answer');
-    if (S.speakQuestion && parsed.q) await speak(parsed.q);
-    await speak(parsed.a);
+    await speakItems(parsed.items);
     finish(true);
   }
 }
@@ -710,15 +817,39 @@ function finish(waitForChange, retry = false) {
   setSub();
 }
 
+// Reads "Q1: … / A1: … / Q2: … / A2: …" (or plain "Q:/A:", or unlabeled text) into a list of items.
 function parseReply(text) {
   text = String(text || '').trim();
   if (!text || /^\W*NONE\W*$/i.test(text) || /^NONE\b/i.test(text)) return null;
-  const qm = text.match(/^\W*Q\s*:\s*(.+)$/im);
-  const am = text.match(/^\W*A\s*:\s*([\s\S]+)$/im);
-  const a = (am ? am[1] : text).replace(/^\W*Q\s*:.*$/im, '').trim();
-  if (!a || /^NONE$/i.test(a)) return null;
-  return { q: qm ? qm[1].trim() : '', a };
+  const items = []; let cur = null, field = null;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim(); if (!line) continue;
+    let m;
+    if ((m = line.match(/^\W*Q\s*\d*\s*:\s*(.*)$/i))) { cur = { q: unmark(m[1]), a: '' }; items.push(cur); field = 'q'; }
+    else if ((m = line.match(/^\W*A\s*\d*\s*:\s*(.*)$/i))) {
+      if (!cur || cur.a) { cur = { q: '', a: '' }; items.push(cur); }
+      cur.a = unmark(m[1]); field = 'a';
+    } else if (cur && field) cur[field] = (cur[field] ? cur[field] + ' ' : '') + unmark(line);
+    else { cur = { q: '', a: line }; items.push(cur); field = 'a'; } // no labels at all: it's the answer
+  }
+  const good = items.filter((it) => it.a && !/^NONE\.?$/i.test(it.a));
+  if (!good.length) return null;
+  return { q: good.map((it) => it.q).filter(Boolean).join(' | '), a: displayItems(good), items: good };
 }
+function unmark(t) { return String(t).replace(/[*_`#]+/g, '').replace(/\s+/g, ' ').trim(); } // drop **bold** marks etc.
+function displayItems(items) {
+  if (items.length === 1) return items[0].a;
+  return items.map((it, i) => (i + 1) + '. ' + (it.q ? it.q + '\n→ ' : '') + it.a).join('\n\n');
+}
+function itemTexts(items) { // exactly what gets spoken, in order
+  const many = items.length > 1, out = [];
+  items.forEach((it, i) => {
+    const lead = many ? 'Number ' + (i + 1) + '. ' : '';
+    if (S.speakQuestion && it.q) { out.push(lead + it.q); out.push(it.a); } else out.push(lead + it.a);
+  });
+  return out;
+}
+function speakItems(items) { itemTexts(items).forEach((t) => speak(t)); return speechChain; }
 
 async function callWorker(dataUrl, timeoutMs) {
   if (!S.workerUrl) return { ok: false, error: 'No Worker URL set' };
@@ -733,7 +864,7 @@ async function callWorker(dataUrl, timeoutMs) {
     const r = await fetch(S.workerUrl.trim().replace(/\/$/, ''), {
       method: 'POST', signal: ctrl.signal,
       headers: { 'Content-Type': 'application/json', 'X-App-Token': S.token.trim() },
-      body: JSON.stringify({ image: dataUrl, prompt: S.prompt + (S.style && S.style.trim() ? '\n\nExtra instructions from the performer: ' + S.style.trim() : ''), models, generationConfig, timeoutMs }),
+      body: JSON.stringify({ image: dataUrl, prompt: S.prompt + (S.allItems ? '' : '\n\nOnly handle the FIRST item on the card, nearest the top.') + (S.style && S.style.trim() ? '\n\nExtra instructions from the performer: ' + S.style.trim() : ''), models, generationConfig, timeoutMs }),
     });
     const j = await r.json().catch(() => ({ error: 'Bad reply from Worker (HTTP ' + r.status + ')' }));
     return { ...j, ok: r.ok && !j.error };
@@ -743,7 +874,8 @@ async function callWorker(dataUrl, timeoutMs) {
 }
 
 function repeatLast() {
-  if (last.a) { tone('answer').then(() => speak(last.a)); }
+  if (last.items && last.items.length) { tone('answer').then(() => speakItems(last.items)); }
+  else if (last.a) { tone('answer').then(() => speak(last.a)); }
   else tone('failed');
 }
 
@@ -797,8 +929,9 @@ function showLast(e) {
     ' · ' + e.kb + ' KB · ' + (e.model || '');
   $('lastQ').textContent = last.q ? 'Card: ' + last.q : '';
   $('lastA').textContent = isAns ? last.a : '(' + e.status + ') ' + (e.error || e.reply || '');
+  if (isAns && last.items && last.items.length > 1) $('lastQ').textContent = last.items.length + ' items on this card';
   $('lastInfo').textContent = info;
-  lastFull = { card: last.q, answer: isAns ? last.a : '', raw: e.reply || e.error || '', status: e.status, info };
+  lastFull = { card: isAns && last.items && last.items.length > 1 ? last.items.length + ' items' : last.q, answer: isAns ? last.a : '', raw: e.reply || e.error || '', status: e.status, info };
   if (!$('reader').hidden) renderReader();
 }
 function renderReader() {
@@ -835,6 +968,7 @@ $('btnStart').onclick = async () => {
   $('stage').classList.add('on');
   drawCropBox();
   await tone('start');
+  if (S.voiceEngine === 'gemini') { prewarmVoice(); if (S.sayReady) speak('Ready'); }
   if (S.autoArm) setArmed(true);
   loop();
 };
@@ -857,6 +991,64 @@ $('btnCam').onclick = () => restartCamera('manual');
 $('btnTestVoice').onclick = () => {
   audioCtx(); setAudioSession(); speechNote = '';
   speak('This is how answers will sound in your earbud.').then(updateSpeechInfo); updateSpeechInfo();
+};
+// ---------------------------------------------------------------- audio check
+// Plays a beep and four numbered voices; you tick which you heard and the app switches to what works.
+let acReport = '';
+async function runAudioCheck() {
+  audioCtx(); setAudioSession(); // inside the tap, so iOS allows sound
+  try { const u = new SpeechSynthesisUtterance('ready'); u.volume = 0; liveUtterances.add(u); u.onend = u.onerror = () => liveUtterances.delete(u); speechSynthesis.speak(u); } catch {}
+  const out = $('acOut'), lines = [];
+  const log = (t) => { lines.push(t); out.textContent = lines.join('\n'); acReport = lines.join('\n'); };
+  const banner = (t) => { $('acBanner').textContent = t; };
+  const desc = (r) => r.started ? 'started' + (r.error ? ', then error: ' + r.error : ' and finished') : 'did NOT start' + (r.error ? ' (' + r.error + ')' : '');
+  $('acHeard').hidden = true; $('btnAudioCheck').disabled = true; $('acMsg').textContent = '';
+  ['acH1', 'acH2', 'acH3', 'acH4', 'acH5'].forEach((id) => { $(id).checked = false; });
+  log('App ' + APP_VERSION + ' · ' + (navigator.userAgent.match(/(iPhone|iPad)[^;)]*|OS [\d_]+|Version\/[\d.]+/g) || [navigator.userAgent.slice(0, 60)]).join(' · '));
+  log('Audio mode: ' + (navigator.audioSession ? navigator.audioSession.type : 'not supported') + ' · Web Audio: ' + actx.state +
+      ' · voices: ' + speechSynthesis.getVoices().length + ' · background sound: ' + (keepAlive && !keepAlive.paused ? 'playing' : 'off') +
+      ' · camera: ' + (track && track.readyState === 'live' ? 'on' : 'off'));
+  banner('1 of 5 — beep'); await beepNow('answer'); await sleep(600); log('1. Beep — played (Web Audio ' + actx.state + ')');
+  banner('2 of 5 — iPhone voice'); let r = await speakDeviceNow('Two. iPhone voice.'); log('2. iPhone voice — ' + desc(r)); await sleep(400);
+  banner('3 of 5 — iPhone voice, background sound paused');
+  if (keepAlive && !keepAlive.paused) { loopPausedForSpeech = true; keepAlive.pause(); }
+  r = await speakDeviceNow('Three. iPhone voice, background sound paused.'); log('3. iPhone voice, background paused — ' + desc(r)); await sleep(400);
+  banner('4 of 5 — iPhone voice, normal audio mode');
+  const hadSession = !!navigator.audioSession;
+  try { if (hadSession) navigator.audioSession.type = 'auto'; } catch {}
+  r = await speakDeviceNow('Four. iPhone voice, normal audio mode.');
+  log('4. iPhone voice, normal audio mode — ' + desc(r) + (hadSession ? '' : ' (audio mode not supported: same as 2)'));
+  setAudioSession(); await sleep(400);
+  banner('5 of 5 — Gemini voice (needs the updated Worker)');
+  try {
+    const t0 = performance.now();
+    const b = await geminiVoiceBuffer('Five. Gemini voice. ' + new Date().toLocaleTimeString());
+    const ms = Math.round(performance.now() - t0);
+    await playBuffer(b); log('5. Gemini voice — played (took ' + ms + ' ms to make)');
+  } catch (e) { log('5. Gemini voice — FAILED: ' + e.message); }
+  banner('Done — tick the numbers you heard'); $('acHeard').hidden = false; $('btnAudioCheck').disabled = false;
+}
+function syncInputs(keys) {
+  for (const k of keys) { const el = document.querySelector('[data-k=' + k + ']'); if (!el) continue; if (el.type === 'checkbox') el.checked = !!S[k]; else el.value = S[k]; }
+}
+$('btnAudioCheck').onclick = () => { runAudioCheck().catch((e) => { $('acBanner').textContent = 'Audio check error: ' + e.message; $('btnAudioCheck').disabled = false; }); };
+$('acApply').onclick = () => {
+  const h = (i) => $('acH' + i).checked;
+  let msg;
+  if (h(2)) { S.voiceEngine = 'device'; S.pauseLoopForSpeech = false; S.audioSessionMode = 'playback'; msg = 'Set: iPhone voice.'; }
+  else if (h(3)) { S.voiceEngine = 'device'; S.pauseLoopForSpeech = true; S.audioSessionMode = 'playback'; msg = 'Set: iPhone voice, with the background sound paused while it speaks.'; }
+  else if (h(4)) { S.voiceEngine = 'device'; S.pauseLoopForSpeech = false; S.audioSessionMode = 'auto'; msg = 'Set: iPhone voice with the normal audio mode. (Beeps may now follow the silent switch.)'; }
+  else if (h(5)) { S.voiceEngine = 'gemini'; msg = 'Set: Gemini voice. It starts about a second later than the iPhone voice; the stall line is prepared in advance.'; }
+  else msg = 'Nothing worked yet. Check: the silent switch on the left side of the phone (orange = silent), the volume while something plays, and Control Center → the audio-output icon is set to your earbuds. Then run the check again.';
+  if (!h(1)) msg += ' You also did not hear the beep — check the volume and that the earbuds are the audio output.';
+  saveSettings(); syncInputs(['voiceEngine', 'pauseLoopForSpeech', 'audioSessionMode']); setAudioSession();
+  geminiVoiceDown = false; voiceFails = 0; prewarmVoice();
+  acReport += '\nHeard: ' + [1, 2, 3, 4, 5].filter(h).join(', ') + '\n' + msg;
+  $('acMsg').textContent = msg;
+};
+$('acCopy').onclick = async () => {
+  try { await navigator.clipboard.writeText(acReport); $('acMsg').textContent = 'Copied — paste it into the chat.'; }
+  catch { $('acMsg').textContent = 'Could not copy automatically — long-press the report above to select it.'; }
 };
 $('btnPromptReset').onclick = () => { S.prompt = DEFAULT_PROMPT; saveSettings(); document.querySelector('[data-k=prompt]').value = S.prompt; syncPreset(); };
 $('btnResetAll').onclick = () => {

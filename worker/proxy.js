@@ -23,10 +23,15 @@
  *     Tries each model in turn if one is busy or fails. If a model rejects the
  *     optional settings ("invalid argument"), it retries with basic settings.
  *     returns { text, model, finishReason, geminiMs, usage, attempts }
+ *   POST / with { tts: "words to say", voice?: "Kore", model?: "..." }
+ *     -> an audio/wav file of Gemini reading the words (the app plays it like music,
+ *        which works even when the iPhone's silent switch is on).
+ *   GEMINI_TTS_MODEL (Text, optional) default voice model, e.g. gemini-2.5-flash-preview-tts
  */
 
-const WORKER_VERSION = 2;
+const WORKER_VERSION = 3;
 const DEFAULT_MODEL = 'gemini-flash-latest';
+const DEFAULT_TTS_MODEL = 'gemini-2.5-flash-preview-tts';
 const MAX_BODY_BYTES = 15 * 1024 * 1024; // ~15 MB of JSON (base64 photo)
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/';
 
@@ -65,6 +70,7 @@ export default {
         tokenOk,
         originOk,
         defaultModel: env.GEMINI_MODEL || DEFAULT_MODEL,
+        tts: true,
       });
     }
 
@@ -83,6 +89,8 @@ export default {
     } catch {
       return json({ error: 'Body must be JSON' }, 400);
     }
+
+    if (typeof body.tts === 'string') return handleTts(env, body, cors, json);
 
     let image = String(body.image || '');
     let mimeType = String(body.mimeType || 'image/jpeg');
@@ -143,6 +151,58 @@ export default {
     }, timedOut ? 504 : 502);
   },
 };
+
+// Text -> speech with Gemini, returned as a WAV file.
+async function handleTts(env, body, cors, json) {
+  const text = String(body.tts).trim().slice(0, 3000);
+  if (!text) return json({ error: 'No text to speak' }, 400);
+  const model = String(body.model || env.GEMINI_TTS_MODEL || DEFAULT_TTS_MODEL);
+  if (!/^[a-z0-9][a-z0-9.\-]{1,63}$/i.test(model)) return json({ error: 'Bad voice model name' }, 400);
+  const voice = /^[A-Za-z]{2,24}$/.test(String(body.voice || '')) ? String(body.voice) : 'Kore';
+  const payload = {
+    contents: [{ role: 'user', parts: [{ text }] }],
+    generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } } },
+  };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 25000);
+  const t0 = Date.now();
+  let res, data;
+  try {
+    res = await fetch(GEMINI_BASE + encodeURIComponent(model) + ':generateContent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
+      body: JSON.stringify(payload), signal: ctrl.signal,
+    });
+    data = await res.json().catch(() => ({}));
+  } catch (e) {
+    return json({ error: e && e.name === 'AbortError' ? 'Gemini voice timed out' : 'Could not reach Gemini' }, 504);
+  } finally { clearTimeout(timer); }
+  if (!res.ok) return json({ error: (data && data.error && data.error.message) || ('Gemini HTTP ' + res.status) }, 502);
+  const parts = (((data.candidates || [])[0] || {}).content || {}).parts || [];
+  const part = parts.find((p) => p.inlineData || p.inline_data);
+  const inl = part && (part.inlineData || part.inline_data);
+  if (!inl || !inl.data) return json({ error: 'Gemini returned no audio' }, 502);
+  const mime = String(inl.mimeType || inl.mime_type || '');
+  const bytes = b64ToBytes(inl.data);
+  const rate = +((/rate=(\d+)/.exec(mime) || [])[1] || 24000);
+  const wav = /wav/i.test(mime) ? bytes : pcmToWav(bytes, rate);
+  return new Response(wav, { headers: { ...cors, 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store', 'X-Gemini-Ms': String(Date.now() - t0) } });
+}
+function b64ToBytes(b64) {
+  const bin = atob(b64), out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function pcmToWav(pcm, rate) { // 16-bit mono PCM -> WAV
+  const buf = new ArrayBuffer(44 + pcm.length), v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + pcm.length, true); w(8, 'WAVE'); w(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, 'data'); v.setUint32(40, pcm.length, true);
+  new Uint8Array(buf, 44).set(pcm);
+  return buf;
+}
 
 async function callGemini(key, model, imagePart, prompt, generationConfig, timeoutMs) {
   const payload = {

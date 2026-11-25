@@ -160,6 +160,25 @@ press any key, and it reconnects. It also keeps retrying quietly. If it keeps ha
 instead of the Home Screen icon (Home Screen apps re-ask for camera permission), and in Safari tap **aA →
 Website Settings → Camera → Allow**.
 
+### No voice? Run the audio check
+
+**Speech & sounds → 🔊 Run audio check.** It plays a beep and four numbered voices made in different ways:
+(2) the iPhone voice, (3) the iPhone voice with the app's background sound paused, (4) the iPhone voice in the
+normal audio mode, (5) the Gemini voice. Tick the numbers you heard and tap **Use what I heard**; the app
+switches to the method that works. **Copy report** copies the technical details so you can paste them to Claude.
+
+The **Gemini voice** is made by your Worker and played through the same route as the beeps, so it works when
+the iPhone voice is silent. It is about 1–2 s slower to start, so it is a fallback: the app starts making it the
+moment the answer arrives, makes several answers at once, and prepares the stall line in advance.
+**It needs the updated Worker**: paste the new `worker/proxy.js` into Cloudflare once more (Step 3, steps 3–5).
+
+### Pages with several questions
+
+The app answers **every** question or item on the card, in order: "Number 1 … Number 2 …". The last-answer
+box and **⤢ Expand** show them all. To go back to only the first item, untick **Gemini → Answer every
+question / item on the page**. Long pages take longer to answer, so raise **Timeout & stall line** if the
+stall line plays too often.
+
 ### Speech
 
 At START it says "Ready" so you know speech works. If iOS swallows speech, the app resets it and tries

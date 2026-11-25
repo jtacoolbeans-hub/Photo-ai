@@ -94,6 +94,11 @@
   table.keys td { padding:6px 4px; border-top:1px solid var(--line); vertical-align:top; } table.keys td:first-child { white-space:nowrap; }
   kbd { background:#000; border:1px solid var(--line); border-radius:5px; padding:1px 6px; font:12px ui-monospace, Menlo, monospace; }
   [hidden] { display:none !important; }
+  button.pri { background:var(--acc); color:#000; }
+  .acbox { background:#000; border-radius:12px; padding:10px; margin-top:10px; }
+  .acbanner { font-size:18px; font-weight:700; color:var(--warn); margin-top:8px; min-height:22px; }
+  #acOut { white-space:pre-wrap; word-break:break-word; margin:6px 0 0; }
+  #lastA { white-space:pre-wrap; word-break:break-word; }
   #camLost { display:flex; flex-direction:column; gap:4px; text-align:center; margin-top:8px; padding:14px; border-radius:12px;
              background:#2b1d00; border:2px solid var(--warn); color:var(--fg); cursor:pointer; font-size:15px; }
   #camLost b { font-size:18px; color:var(--warn); } #camLost .small { font-size:12px; color:var(--mut); }
@@ -204,6 +209,7 @@
     <option value="question">Questions only — answer the printed question</option>
     <option value="custom">Custom (my own prompt below)</option>
   </select>
+  <label class="chk"><input type="checkbox" data-k="allItems"> Answer every question / item on the page (not just the first)</label>
   <label>Style (optional) — added to every request</label>
   <input type="text" data-k="style" placeholder="e.g. be witty · keep it under 15 words · sound confident" autocapitalize="off">
   <label>Full prompt (advanced)</label>
@@ -230,7 +236,36 @@
 
 <details>
   <summary>Speech &amp; sounds</summary>
-  <label>Voice</label>
+  <div class="acbox">
+    <button id="btnAudioCheck" class="pri">🔊 Run audio check (about 25 s)</button>
+    <div class="hint">Plays a beep and four numbered voices, using different methods. Wear your earbuds, then tick the ones you heard and tap “Use what I heard”.</div>
+    <div id="acBanner" class="acbanner"></div>
+    <pre id="acOut" class="mono hint"></pre>
+    <div id="acHeard" hidden>
+      <b>Which did you hear?</b>
+      <label class="chk"><input type="checkbox" id="acH1"> 1 — beep</label>
+      <label class="chk"><input type="checkbox" id="acH2"> 2 — iPhone voice</label>
+      <label class="chk"><input type="checkbox" id="acH3"> 3 — iPhone voice, background sound paused</label>
+      <label class="chk"><input type="checkbox" id="acH4"> 4 — iPhone voice, normal audio mode</label>
+      <label class="chk"><input type="checkbox" id="acH5"> 5 — Gemini voice</label>
+      <button id="acApply" class="pri">Use what I heard</button><button id="acCopy">Copy report</button>
+      <div id="acMsg" class="hint"></div>
+    </div>
+  </div>
+  <label>Voice engine</label>
+  <select data-k="voiceEngine">
+    <option value="device">iPhone voice (instant)</option>
+    <option value="gemini">Gemini voice (works if the iPhone voice is silent; ~1–2 s slower to start)</option>
+  </select>
+  <div class="row">
+    <div><label>Gemini voice</label><select data-k="ttsVoice">
+      <option>Kore</option><option>Puck</option><option>Charon</option><option>Aoede</option><option>Fenrir</option><option>Leda</option><option>Orus</option><option>Zephyr</option></select></div>
+    <div><label>Gemini voice model</label><input type="text" data-k="ttsModel" autocapitalize="off" autocorrect="off"></div>
+  </div>
+  <label class="chk"><input type="checkbox" data-k="pauseLoopForSpeech"> Pause the background sound while the iPhone voice speaks</label>
+  <label>Audio mode</label>
+  <select data-k="audioSessionMode"><option value="playback">Playback — ignore the silent switch (default)</option><option value="auto">Normal</option></select>
+  <label>iPhone voice</label>
   <select id="voiceSel" data-k="voiceURI"><option value="">System default</option></select>
   <div class="row">
     <div><label>Speech speed (0.5–1.5)</label><input type="number" data-k="rate" min="0.5" max="1.5" step="0.05"></div>

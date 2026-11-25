@@ -26,7 +26,7 @@ in the real venue lighting before the first show.
 
 ## Setup in the box (about 15 minutes before)
 
-- [ ] Earbuds in and connected. Tap **Test voice** in **Speech & sounds** and check you hear it.
+- [ ] Earbuds in and connected. Run **Speech & sounds → 🔊 Audio check**, tick what you heard, tap **Use what I heard**.
 - [ ] Open the app (from the Home Screen icon or Safari) and tap **START**. You hear three rising notes.
 - [ ] Put the phone in the box. Place a practice card where the real cards will go.
 - [ ] Check the camera view shows the card sharply. Tap **Draw crop box** and drag a box around the
