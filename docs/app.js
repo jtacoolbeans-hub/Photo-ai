@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.13.2';
+const APP_VERSION = '1.14.0';
 const MIN_WORKER_VERSION = 5;
 const RECOMMENDED_WORKER_VERSION = 8; // 8 = Deepgram voice, Gemini model list, cheapest Cloudflare voice first
 
@@ -114,7 +114,7 @@ const DEFAULTS = {
   models: 'gemini-3.5-flash, gemini-flash-latest',
   mediaResolution: 'MEDIA_RESOLUTION_HIGH', thinking: 'minimal', maxTokens: 2048,
   prompt: DEFAULT_PROMPT, style: '', allItems: true,
-  voiceEngine: 'auto', dgVoice: 'aura-2-thalia-en', cfModel: '@cf/deepgram/aura-1', cfVoice: 'luna', ttsVoice: 'Kore', ttsModel: 'gemini-2.5-flash-preview-tts, gemini-2.5-pro-preview-tts',
+  voiceEngine: 'device', dgVoice: 'aura-2-thalia-en', cfModel: '@cf/deepgram/aura-1', cfVoice: 'luna', ttsVoice: 'Kore', ttsModel: 'gemini-2.5-flash-preview-tts, gemini-2.5-pro-preview-tts',
   maxVoiceChars: 500, deviceFallback: true, cacheClips: true, deviceMode: 1, pauseLoopForSpeech: true, audioSessionMode: 'playback', freezeMode: 'speech',
   maxSide: 2048, jpegQuality: 85,
   timeoutSec: 8, stallLine: 'Great question. Give me just a second with that one.',
@@ -131,7 +131,7 @@ for (const k of CUE_KEYS) DEFAULTS['cue_' + k] = 'tone';
 
 // ---------------------------------------------------------------- settings
 const LS_KEY = 'cardAssistant.settings.v1';
-const SETTINGS_VER = 12;
+const SETTINGS_VER = 13;
 let S = loadSettings();
 function loadSettings() {
   let saved = {};
@@ -145,6 +145,7 @@ function loadSettings() {
     }
     if ([OLD_PROMPT_V1, OLD_QUESTION_V2, OLD_ANYTHING_V3, OLD_ANYTHING_V4, OLD_QUESTION_V4, OLD_ANYTHING_V5, OLD_QUESTION_V5].includes(saved.prompt)) delete saved.prompt;
     if ((saved.v || 1) < 4 && saved.maxTokens === 1024) delete saved.maxTokens; // longer pages need room for many answers
+    if ((saved.v || 1) < 13 && saved.voiceEngine === 'auto') delete saved.voiceEngine; // the iPhone voice works (and is unlimited and free): it is the default now
     if ((saved.v || 1) < 11) { // the free Cloudflare allowance is small: use the cheaper model, and 'auto' picks the best voice you have
       if (saved.voiceEngine === 'cf' || saved.voiceEngine === 'gemini') delete saved.voiceEngine;
       if (saved.cfModel === '@cf/deepgram/aura-2-en') delete saved.cfModel;
@@ -432,7 +433,7 @@ function speakDeviceNow(text) {
         sev('voice did not start — retrying');
         if (tries < 2) { try { speechSynthesis.cancel(); } catch {} cur = null; setTimeout(say, 500); } // iOS drops a speak() that comes right after cancel()
         else { speechNote = 'Speech is not starting — run Speech & sounds → Audio check'; setSub(); }
-      }, 3000);
+      }, 2000); // iOS normally starts within about half a second
     };
     speaking = true; setSub();
     // Anything still "talking" now is a leftover (we say one thing at a time): clear it so we don't queue behind it.
@@ -507,14 +508,17 @@ async function checkWorker() {
   return workerInfo;
 }
 const engineDown = { dg: '', cf: '', gemini: '', device: '' }; // set when an engine can't be used this session (daily limit, not connected)
-function netVoice() { return S.voiceEngine !== 'device' && !!S.workerUrl; }
+function netVoice() { return !!S.workerUrl; } // the voice chain (iPhone voice and/or online voices) is used when a Worker is set up
 const isParallel = (e) => e === 'cf' || e === 'dg'; // these are cheap and quick enough to start all at once
 const engineBackoff = { dg: 0, cf: 0, gemini: 0, device: 0 }, engineFails = { dg: 0, cf: 0, gemini: 0, device: 0 }; // temporary pauses (a failing voice isn't hammered)
 function resetEngines() { for (const e of Object.keys(engineDown)) { engineDown[e] = ''; engineBackoff[e] = 0; engineFails[e] = 0; } }
-function voiceOrder() { // your choice first ("auto" = the best you have set up), the others as backup, the iPhone voice last of all
-  const all = ['dg', 'cf', 'gemini'];
-  const pref = S.voiceEngine === 'auto' || S.voiceEngine === 'device' ? all : [S.voiceEngine, ...all.filter((e) => e !== S.voiceEngine)];
-  const list = pref.filter((e) => !engineDown[e]).concat(S.deviceFallback !== false ? ['device'] : []);
+function voiceOrder() { // your choice first, the others as backup. "iPhone voice": it first, the online voices only if it will not start.
+  if (!S.workerUrl) return ['device']; // no Worker: only the iPhone voice is possible
+  const net = ['dg', 'cf', 'gemini'];
+  const pref = S.voiceEngine === 'device' ? ['device', ...net]
+    : S.voiceEngine === 'auto' ? [...net, 'device']
+    : [S.voiceEngine, ...net.filter((e) => e !== S.voiceEngine), 'device'];
+  const list = pref.filter((e) => (e === 'device' ? (S.voiceEngine === 'device' || S.deviceFallback !== false) : !engineDown[e]));
   const live = list.filter((e) => Date.now() >= engineBackoff[e]);
   return live.length ? live : list; // if every voice is pausing, still try rather than stay silent
 }
@@ -552,7 +556,12 @@ async function playVoice(text, firstJob, more = false) {
   for (const eng of voiceOrder()) {
     if (eng === 'device') { // last resort: the iPhone's own voice (unlimited and free)
       holdLoop(true);
-      try { const r = await speakDeviceNow(text); if (r.started && !r.error) { if (/^Voice/.test(speechNote)) speechNote = ''; return; } errs.push('iPhone voice did not start'); }
+      try {
+        const r = await speakDeviceNow(text);
+        if (r.started && !r.error) { if (/^Voice/.test(speechNote)) speechNote = ''; return; }
+        errs.push('iPhone voice did not start');
+        engineBackoff.device = Date.now() + 60000; sev('iPhone voice did not start — using the online voices for the next minute'); // don't wait ~7 s on every piece
+      }
       finally { releaseLoop(); }
       continue;
     }
@@ -691,7 +700,7 @@ async function playJob(job, more = false) {
   }
 }
 function prewarmVoice() { // make the short fixed lines in advance (once ever: they are then kept on the phone)
-  if (!netVoice()) return;
+  if (!netVoice() || voiceOrder()[0] === 'device') return; // the iPhone voice is instant and free: nothing to prepare
   const eng = voiceOrder().find((e) => e !== 'device'); if (!eng) return;
   voiceJob(S.stallLine, { engine: eng, stream: false });
   if (isParallel(eng)) for (let n = 1; n <= 6; n++) voiceJob('Number ' + n + '.', { engine: eng }); // Gemini: too few free requests to spare

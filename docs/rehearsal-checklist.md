@@ -33,6 +33,7 @@ in the real venue lighting before the first show.
       card area with a little margin, then tap **Done drawing**.
 - [ ] With the box **empty**, open **Detection** and tap **Learn empty view**. Check the **page** meter shows ✕ when
       the box is empty and ✓ with a green outline when a card is in place (try your smallest card).
+- [ ] Tap **START** and listen for the spoken **"Ready"** (the iPhone voice). No "Ready" means the silent switch, the volume or the earbud connection: run **Speech & sounds → iPhone voice lab**.
 - [ ] Look at **"Voice used today"** under the camera view. Cloudflare's free voice is only about 7,000 characters a day and
       Gemini's about 10 lines: don't use them up in rehearsal if you rely on them for the show (or set up the Deepgram key).
 - [ ] Watch the meters:

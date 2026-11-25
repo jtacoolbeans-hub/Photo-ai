@@ -274,13 +274,13 @@
   </div>
   <label>Voice engine</label>
   <select data-k="voiceEngine">
-    <option value="auto">Automatic — the best voice you have set up (default)</option>
-    <option value="dg">Deepgram voice — fast, generous free credit (needs a free key)</option>
-    <option value="cf">Cloudflare voice — free, but only ~7,000 characters a day</option>
-    <option value="gemini">Gemini voice — natural, but only ~10 free lines a day</option>
-    <option value="device">iPhone voice — unlimited (may be silent while the camera is on)</option>
+    <option value="device">iPhone voice — unlimited and free (default); the online voices are the backup if it will not start</option>
+    <option value="auto">Online voices — Deepgram, then Cloudflare, then Gemini (iPhone voice as the last resort)</option>
+    <option value="dg">Deepgram voice first — fast, generous free credit (needs a free key)</option>
+    <option value="cf">Cloudflare voice first — free, but only ~7,000 characters a day</option>
+    <option value="gemini">Gemini voice first — natural, but only ~10 free lines a day</option>
   </select>
-  <label class="chk"><input type="checkbox" data-k="deviceFallback"> If every online voice is used up, try the iPhone voice</label>
+  <label class="chk"><input type="checkbox" data-k="deviceFallback"> When an online voice is first and all of them are used up, try the iPhone voice</label>
   <label>Longest spoken reply for the small free voices (Cloudflare, Gemini), in characters (0 = no limit). Deepgram and the iPhone voice always read everything.</label>
   <input type="number" data-k="maxVoiceChars" min="0" max="5000" step="50">
   <label class="chk"><input type="checkbox" data-k="cacheClips"> Keep short lines (stall line, “Number 1”, “Ready”) on the phone so they are only ever made once</label>

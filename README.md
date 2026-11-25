@@ -175,6 +175,14 @@ quota, no extra key. Gemini's voice is kept as the backup. One-time setup on you
 If a voice runs out of its free allowance, the app stops asking it for the rest of the session and uses the
 other one; the status line shows a short message such as "Gemini free daily limit reached — resets in 11 h 47 m".
 
+### The voice (version 1.14): iPhone voice first
+
+The iPhone's own voice is now the default: it is unlimited and free, starts instantly, and spends nothing. (It was silent
+for a long time only because iOS ignores speech until the page has spoken once during a tap — fixed in 1.13.1, confirmed
+working on a real iPhone.) At START it says **"Ready"** out loud so you know it works. If the iPhone voice ever fails to
+start, the online voices (Deepgram, then Cloudflare, then Gemini) take over for the next minute, so a hiccup never leaves you
+silent. Choose another first voice any time under **Speech & sounds → Voice engine**. The sections below are about the online voices.
+
 ### Voice limits, and how to get plenty of free voice (version 1.12+)
 
 **The free allowances are small.** Cloudflare's is 10,000 "units" a day, which on its cheaper voice (aura-1) is only
