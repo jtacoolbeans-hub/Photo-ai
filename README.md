@@ -21,7 +21,7 @@ iPhone Safari (docs/app.html)  ──photo──▶  Cloudflare Worker (worker/p
 | `docs/app.html` + `docs/app.js` | **The show app** |
 | `docs/log.html` | Capture log: what the camera saw, and the replies |
 | `docs/test.html` | Phase 0 camera/reading test page |
-| `docs/rehearsal-checklist.md` | Step-by-step pre-show checklist |
+| `docs/rehearsal-checklist.html` (and `.md`) | Step-by-step pre-show checklist, phone-friendly |
 | `docs/sw.js`, `docs/manifest.webmanifest`, `docs/icons/` | Home-screen app support |
 | `worker/proxy.js` | Cloudflare Worker that holds the Gemini key |
 
@@ -110,6 +110,33 @@ Make up a long random password, e.g. `blue-tiger-4417-lamp-orbit`. This is your
 
 These only work while the app is open and nothing else is playing audio.
 
+### Keyboard or Bluetooth clicker
+
+Works too (a page-turner just sends ordinary keys). **Space / Enter** = single earbud press,
+**→ / Page Down** = double, **← / Page Up** = triple. **A** arm/disarm, **C** capture,
+**R** repeat, **S** show mode, **K** restart camera, **Esc** leave show mode.
+
+### Reading speed
+
+**Detection → Capture speed**: *Fastest* sends the first sharp frame as soon as the picture is
+still. *Fast* (default) checks twice and sends the sharpest of 2. *Careful* waits longer for
+the sharpest of 4. Gemini's own thinking time is also kept to a minimum.
+
+### Cues, and vibration
+
+**Speech & sounds → Cues** lets you set each cue (started, armed, disarmed, captured, waiting
+tick, answer, failed) to **Sound** or **Off**. iPhone Safari does not allow web pages to
+vibrate the phone, so there is no vibration option on iPhone; on phones whose browser supports
+it (e.g. Android) **Vibrate** and **Sound + vibrate** appear automatically.
+
+### Camera freezes
+
+The app watches the camera. If the picture freezes, goes black, or iOS stops the camera, it
+restarts it by itself within about 5 seconds (a second quick failure drops to plain 720p).
+Each restart is written to the capture log. You can also tap **Camera ↻**, or press **K**.
+The default resolution is now 1920×1440, which runs much cooler than the full 12 MP camera.
+Pick a higher one under **Camera & crop → Resolution** if the text is too small to read.
+
 ### Settings worth tuning (all saved on the phone)
 
 - **Gemini → Models to try:** `gemini-3.5-flash, gemini-flash-latest`. If the first is busy,
@@ -145,4 +172,6 @@ lighting.
 | Camera error / black video | iPhone Settings → Apps → Safari → Camera → **Allow**, reload. |
 | Earbud buttons do nothing | Tap START again; close music/podcast apps; check the earbuds are connected. |
 | "Screen lock: NOT held" | Set iPhone Auto-Lock to **Never** (Settings → Display & Brightness). |
-| Reads the empty box / never captures | Adjust **Minimum sharpness** using the live meter. |
+| Reads the empty box / never captures | Adjust **Minimum sharpness** using the live meter. A card that is too dim or blurry shows "Not sent: sharpness…" under the status. |
+| Lots of NONE in the log | Open the thumbnail: is it frozen, cut off, or too small? Try Camera ↻, a larger crop box, or a higher resolution. |
+| Picture frozen / black | It should restart itself. Otherwise tap **Camera ↻** or press **K**. |

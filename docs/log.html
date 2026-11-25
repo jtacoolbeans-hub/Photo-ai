@@ -16,7 +16,7 @@
   .e { display:flex; gap:10px; background:#181818; border-radius:10px; padding:8px; margin-bottom:8px; }
   .e img { width:120px; height:auto; border-radius:6px; flex:0 0 auto; align-self:flex-start; }
   .e .t { font-size:13px; color:#999; } .e .r { white-space:pre-wrap; word-break:break-word; margin-top:4px; }
-  .answer { color:#4caf50; } .late-answer { color:#8bc34a; } .fail, .none { color:#ff5252; } .none-retry, .duplicate { color:#ffb300; }
+  .camera { color:#4fa3ff; } .answer { color:#4caf50; } .late-answer { color:#8bc34a; } .fail, .none { color:#ff5252; } .none-retry, .duplicate { color:#ffb300; }
   #big { position:fixed; inset:0; background:#000; display:none; z-index:9; overflow:auto; }
   #big img { width:100%; height:auto; }
   #sum { color:#999; font-size:13px; }
@@ -56,10 +56,11 @@ async function render() {
   for (const e of items) {
     const d = new Date(e.t), ds = d.toLocaleDateString();
     if (ds !== day) { day = ds; html += '<h3>' + esc(ds) + '</h3>'; }
-    html += '<div class="e"><img src="' + e.thumb + '" data-id="' + e.id + '"><div>' +
+    html += '<div class="e">' + (e.thumb ? '<img src="' + e.thumb + '" data-id="' + e.id + '">' : '') + '<div>' +
       '<div class="t">' + esc(d.toLocaleTimeString()) + ' · ' + esc(e.trigger) + ' · <b class="' + esc(e.status) + '">' + esc(e.status) + '</b></div>' +
       '<div class="t">' + ((e.latencyMs || 0) / 1000).toFixed(1) + ' s · sharp ' + esc(e.sharp) + ' · motion ' + esc(e.motion) +
-      ' · ' + esc(e.w) + '×' + esc(e.h) + ' · ' + esc(e.kb) + ' KB · ' + esc(e.model) + '</div>' +
+      (e.w ? ' · ' + esc(e.w) + '×' + esc(e.h) + ' · ' + esc(e.kb) + ' KB' : '') + (e.model ? ' · ' + esc(e.model) : '') +
+      (e.cam ? ' · cam ' + esc(e.cam) + ', frame age ' + esc(e.frameAge) + ' ms' : '') + '</div>' +
       '<div class="r">' + esc(e.reply || e.error || '') + '</div></div></div>';
   }
   list.innerHTML = html;

@@ -38,6 +38,8 @@ in the real venue lighting before the first show.
   - plays a high **blip** (captured), then soft **ticks** (thinking), then a **chime** and the answer
   - is read only once, until you swap the card
 - [ ] Try a **double press** (capture now) and a **triple press** (repeat last answer).
+- [ ] Pick **Capture speed** under **Detection** (Fast is the default; Fastest reads the first sharp frame).
+- [ ] Under **Speech & sounds → Cues**, turn off any cue you don't want to hear. (iPhone can't vibrate from a web page.)
 - [ ] Tap **SHOW MODE**. The screen goes black (double-tap the screen to come back).
 - [ ] Leave it running and armed. Check the phone isn't getting hot (see below).
 
@@ -63,6 +65,12 @@ in the real venue lighting before the first show.
 
 You can change these in **Earbud buttons**.
 
+## Keyboard or clicker (optional)
+
+A keyboard or Bluetooth page-turner paired to the phone works too. **Space / Enter** = single press,
+**→ / Page Down** = double, **← / Page Up** = triple. Letters: **A** arm/disarm, **C** capture,
+**R** repeat, **S** show mode, **K** restart camera, **Esc** leave show mode. Turn it off under **Keyboard & clicker**.
+
 ## Heat
 
 - Use **SHOW MODE** whenever you can. A black screen saves the most power.
@@ -79,6 +87,7 @@ You can change these in **Earbud buttons**.
 | Stall line | Gemini was slow or couldn't read it. Talk through it; a late answer may still come |
 | Same answer as the previous card | Triple-press repeats the last answer; double-press to read the new card |
 | Wrong answer | Check the **Capture log** afterwards to see what the camera saw |
+| Picture frozen or black on the screen | The app restarts the camera by itself within about 5 seconds. You can also tap **Camera ↻** |
 
 ## After the show
 

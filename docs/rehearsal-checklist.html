@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rehearsal checklist</title>
+<style>
+:root{color-scheme:dark}
+body{margin:0;padding:16px 14px 60px;background:#0b0b0b;color:#eee;font:16px/1.45 -apple-system,system-ui,sans-serif;max-width:720px}
+h1{font-size:24px;margin:6px 0 10px} h2{font-size:18px;margin:26px 0 8px;color:#4fa3ff} a{color:#4fa3ff}
+ul{padding-left:20px} ul.todo{list-style:none;padding:0} ul.todo li{margin:8px 0}
+ul.todo label{display:flex;gap:10px;align-items:flex-start} ul.todo input{width:22px;height:22px;flex:0 0 auto;margin-top:2px}
+table{border-collapse:collapse;width:100%;margin:8px 0;font-size:15px} th,td{border:1px solid #333;padding:7px;text-align:left;vertical-align:top} th{background:#1c1c1e}
+code{background:#1c1c1e;padding:1px 5px;border-radius:5px;font-size:14px}
+</style></head><body>
+<p><a href="app.html">&larr; Show app</a> &middot; <a href="index.html">Home</a></p>
+<h1>Rehearsal checklist</h1>
+<p>Print this or keep it open on another device. Do a full run-through at least once</p>
+<p>in the real venue lighting before the first show.</p>
+<h2>The day before</h2>
+<ul class="todo">
+<li><label><input type="checkbox"> <span>Phone charged to 100%. Bring the charging cable and a battery pack.</span></label></li>
+<li><label><input type="checkbox"> <span>Earbuds charged.</span></label></li>
+<li><label><input type="checkbox"> <span>Open the app once on the venue Wi-Fi or mobile data, so you get the latest version.</span></label></li>
+<li><label><input type="checkbox"> <span><b>Connection → Test connection</b> shows four ✅ lines.</span></label></li>
+<li><label><input type="checkbox"> <span>Print 10 practice cards in 12pt Times New Roman, like your manager's.</span></label></li>
+</ul>
+<h2>iPhone settings (Settings app)</h2>
+<ul class="todo">
+<li><label><input type="checkbox"> <span><b>Display &amp; Brightness → Auto-Lock → Never</b> (backup in case the app's screen lock fails)</span></label></li>
+<li><label><input type="checkbox"> <span><b>Battery → Low Power Mode → Off</b> (Low Power slows the camera and can let the screen sleep)</span></label></li>
+<li><label><input type="checkbox"> <span><b>Focus → Do Not Disturb → On</b>, so no calls or notification sounds reach your earbud</span></label></li>
+<li><label><input type="checkbox"> <span><b>Notifications → Announce Notifications → Off</b></span></label></li>
+<li><label><input type="checkbox"> <span><b>Accessibility → Spoken Content → Voices</b>: download an "Enhanced" English voice, then pick it in the app under <b>Speech &amp; sounds → Voice</b> (if it appears in the list). It sounds much more natural.</span></label></li>
+<li><label><input type="checkbox"> <span><b>Safari → Camera → Allow</b> (so it doesn't ask every time)</span></label></li>
+<li><label><input type="checkbox"> <span>Close music apps. If another app is playing audio, the earbud buttons go to it instead.</span></label></li>
+</ul>
+<h2>Setup in the box (about 15 minutes before)</h2>
+<ul class="todo">
+<li><label><input type="checkbox"> <span>Earbuds in and connected. Tap <b>Test voice</b> in <b>Speech &amp; sounds</b> and check you hear it.</span></label></li>
+<li><label><input type="checkbox"> <span>Open the app (from the Home Screen icon or Safari) and tap <b>START</b>. You hear three rising notes.</span></label></li>
+<li><label><input type="checkbox"> <span>Put the phone in the box. Place a practice card where the real cards will go.</span></label></li>
+<li><label><input type="checkbox"> <span>Check the camera view shows the card sharply. Tap <b>Draw crop box</b> and drag a box around the card area with a little margin, then tap <b>Done drawing</b>.</span></label></li>
+<li><label><input type="checkbox"> <span>Watch the meters: - <b>motion</b> should drop below the motion threshold (it turns green) when nothing is moving. - <b>sharpness</b> with a card in place should be well above <b>Minimum sharpness</b> (green). With the box empty it should be below. If not, adjust <b>Detection → Minimum sharpness</b>.</span></label></li>
+<li><label><input type="checkbox"> <span><b>Arm</b> with a single earbud press. You hear two rising notes.</span></label></li>
+<li><label><input type="checkbox"> <span>Run 3–5 practice cards end to end. Check that each one: - plays a high <b>blip</b> (captured), then soft <b>ticks</b> (thinking), then a <b>chime</b> and the answer - is read only once, until you swap the card</span></label></li>
+<li><label><input type="checkbox"> <span>Try a <b>double press</b> (capture now) and a <b>triple press</b> (repeat last answer).</span></label></li>
+<li><label><input type="checkbox"> <span>Pick <b>Capture speed</b> under <b>Detection</b> (Fast is the default; Fastest reads the first sharp frame).</span></label></li>
+<li><label><input type="checkbox"> <span>Under <b>Speech &amp; sounds → Cues</b>, turn off any cue you don't want to hear. (iPhone can't vibrate from a web page.)</span></label></li>
+<li><label><input type="checkbox"> <span>Tap <b>SHOW MODE</b>. The screen goes black (double-tap the screen to come back).</span></label></li>
+<li><label><input type="checkbox"> <span>Leave it running and armed. Check the phone isn't getting hot (see below).</span></label></li>
+</ul>
+<h2>Know your sounds</h2>
+<table><tr><th>Sound</th><th>Meaning</th></tr>
+<tr><td>Three rising notes</td><td>App started</td></tr>
+<tr><td>Two rising notes</td><td>Armed (watching for cards)</td></tr>
+<tr><td>Two falling notes</td><td>Disarmed</td></tr>
+<tr><td>One high blip</td><td>Card captured</td></tr>
+<tr><td>Soft low tick (every 2 s)</td><td>Waiting for Gemini</td></tr>
+<tr><td>Two bright notes, then speech</td><td>The answer</td></tr>
+<tr><td>Low two-note buzz, then your stall line</td><td>Slow, failed, or unreadable</td></tr>
+</table>
+<h2>Earbud controls</h2>
+<table><tr><th>Press</th><th>Default action</th></tr>
+<tr><td>Single</td><td>Arm / disarm</td></tr>
+<tr><td>Double</td><td>Capture now (skips the stillness check)</td></tr>
+<tr><td>Triple</td><td>Repeat last answer</td></tr>
+</table>
+<p>You can change these in <b>Earbud buttons</b>.</p>
+<h2>Keyboard or clicker (optional)</h2>
+<p>A keyboard or Bluetooth page-turner paired to the phone works too. <b>Space / Enter</b> = single press,</p>
+<p><b>→ / Page Down</b> = double, <b>← / Page Up</b> = triple. Letters: <b>A</b> arm/disarm, <b>C</b> capture,</p>
+<p><b>R</b> repeat, <b>S</b> show mode, <b>K</b> restart camera, <b>Esc</b> leave show mode. Turn it off under <b>Keyboard &amp; clicker</b>.</p>
+<h2>Heat</h2>
+<ul>
+<li>Use <b>SHOW MODE</b> whenever you can. A black screen saves the most power.</li>
+<li>Keep it <b>disarmed</b> until close to the start. Disarmed, it checks only once a second.</li>
+<li>Lower <b>Camera &amp; crop → Camera frame rate</b> to 10 fps if the phone gets warm.</li>
+<li>If you can, leave a small air gap or vent in the box. Don't run it while charging inside a</li>
+</ul>
+<p>  closed box.</p>
+<h2>If something goes wrong on stage</h2>
+<table><tr><th>What you hear</th><th>What to do</th></tr>
+<tr><td>Nothing after placing a card</td><td>Double-press to force a capture</td></tr>
+<tr><td>Stall line</td><td>Gemini was slow or couldn't read it. Talk through it; a late answer may still come</td></tr>
+<tr><td>Same answer as the previous card</td><td>Triple-press repeats the last answer; double-press to read the new card</td></tr>
+<tr><td>Wrong answer</td><td>Check the <b>Capture log</b> afterwards to see what the camera saw</td></tr>
+<tr><td>Picture frozen or black on the screen</td><td>The app restarts the camera by itself within about 5 seconds. You can also tap <b>Camera ↻</b></td></tr>
+</table>
+<h2>After the show</h2>
+<ul class="todo">
+<li><label><input type="checkbox"> <span>Open <b>CAPTURE LOG</b>. Check each thumbnail, its sharpness, timing and reply.</span></label></li>
+<li><label><input type="checkbox"> <span>Tap <b>Export</b> to save the log as a file (Files app or AirDrop).</span></label></li>
+<li><label><input type="checkbox"> <span>Note any misreads, and adjust the crop, lighting or thresholds before next time.</span></label></li>
+</ul>
+</body></html>

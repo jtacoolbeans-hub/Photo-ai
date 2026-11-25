@@ -79,8 +79,8 @@
   .controls button.pri { background:var(--acc); color:#000; } .controls button.pri small { color:#00264d; }
   .controls button.armed { background:var(--ok); color:#000; } .controls button.armed small { color:#063; }
   .controls button.running { background:var(--card2); color:var(--ok); }
-  .tools { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin-top:8px; }
-  .tools button, .tools a { margin:0; padding:10px 4px; font-size:12px; border-radius:12px; background:var(--card2); color:var(--fg);
+  .tools { display:grid; grid-template-columns:repeat(5,1fr); gap:5px; margin-top:8px; }
+  .tools button, .tools a { margin:0; padding:10px 2px; font-size:11px; border-radius:12px; background:var(--card2); color:var(--fg);
                             text-decoration:none; text-align:center; font-weight:600; display:flex; flex-direction:column; gap:3px; align-items:center; }
   .tools .ico { font-size:18px; line-height:1; }
 
@@ -88,9 +88,14 @@
   #answerCard { border-left:4px solid var(--acc); }
   #lastQ { color:var(--mut); font-size:14px; } #lastA { font-size:19px; font-weight:600; margin-top:6px; line-height:1.35; }
 
+  .cuerow { display:grid; grid-template-columns:1fr 128px 42px; gap:8px; align-items:center; margin-top:8px; font-size:14px; }
+  .cuerow select { padding:8px; font-size:15px; } .cuerow button { margin:0; padding:8px 0; }
+  table.keys { width:100%; border-collapse:collapse; margin-top:8px; font-size:14px; }
+  table.keys td { padding:6px 4px; border-top:1px solid var(--line); vertical-align:top; } table.keys td:first-child { white-space:nowrap; }
+  kbd { background:#000; border:1px solid var(--line); border-radius:5px; padding:1px 6px; font:12px ui-monospace, Menlo, monospace; }
   #show { position:fixed; inset:0; background:#000; z-index:50; display:none; }
   #show .tiny { position:absolute; left:12px; bottom:calc(env(safe-area-inset-bottom) + 10px); color:#1c1c1c; font-size:12px; }
-  body.showmode #video { position:fixed; width:2px !important; height:2px; opacity:0.01; top:0; left:0; }
+  body.showmode #stage.on #video, body.showmode #video { position:fixed; width:2px !important; height:2px !important; min-height:0 !important; max-height:2px !important; opacity:0.01; top:0; left:0; }
 </style>
 </head>
 <body>
@@ -123,8 +128,9 @@
   </div>
   <div class="tools">
     <button id="btnDraw"><span class="ico">⬚</span><span id="drawLbl">Crop box</span></button>
-    <button id="btnCropReset"><span class="ico">⛶</span>Full frame</button>
-    <button id="btnShow" disabled><span class="ico">◐</span>Show mode</button>
+    <button id="btnCropReset"><span class="ico">⛶</span>Full</button>
+    <button id="btnShow" disabled><span class="ico">◐</span>Show</button>
+    <button id="btnCam" disabled><span class="ico">↻</span>Camera</button>
     <a href="log.html"><span class="ico">☰</span>Log</a>
   </div>
 </section>
@@ -201,12 +207,10 @@
   </div>
   <label class="chk"><input type="checkbox" data-k="speakQuestion"> Speak the question before the answer</label>
   <label class="chk"><input type="checkbox" data-k="thinkTicks"> Soft tick every 2 s while waiting for Gemini</label>
-  <div>
-    <button data-tone="ready">Ready</button><button data-tone="disarmed">Disarmed</button>
-    <button data-tone="captured">Captured</button><button data-tone="thinking">Thinking</button>
-    <button data-tone="answer">Answer</button><button data-tone="failed">Failed</button>
-    <button id="btnTestVoice">Test voice</button>
-  </div>
+  <label>Cues — choose what each one does (▶ tries it)</label>
+  <div id="cueList"></div>
+  <div class="hint" id="vibNote"></div>
+  <button id="btnTestVoice">Test voice</button>
 </details>
 
 <details>
@@ -230,15 +234,32 @@
 </details>
 
 <details>
+  <summary>Keyboard &amp; clicker</summary>
+  <div class="hint">Works with a keyboard, or a Bluetooth page-turner / clicker paired to the phone. Click a blank part of the page first if keys seem ignored.</div>
+  <label class="chk"><input type="checkbox" data-k="keyboard"> Keyboard shortcuts on</label>
+  <table class="keys">
+    <tr><td><kbd>Space</kbd> <kbd>Enter</kbd></td><td>START (before it runs) · then same as a single earbud press</td></tr>
+    <tr><td><kbd>→</kbd> <kbd>Page Down</kbd> <kbd>N</kbd></td><td>Same as a double earbud press</td></tr>
+    <tr><td><kbd>←</kbd> <kbd>Page Up</kbd> <kbd>P</kbd></td><td>Same as a triple earbud press</td></tr>
+    <tr><td><kbd>A</kbd></td><td>Arm / disarm</td></tr>
+    <tr><td><kbd>C</kbd></td><td>Capture now</td></tr>
+    <tr><td><kbd>R</kbd></td><td>Repeat last answer</td></tr>
+    <tr><td><kbd>S</kbd></td><td>Show mode on / off (or START)</td></tr>
+    <tr><td><kbd>K</kbd></td><td>Restart camera</td></tr>
+    <tr><td><kbd>Esc</kbd></td><td>Leave show mode</td></tr>
+  </table>
+</details>
+
+<details>
   <summary>Camera &amp; crop</summary>
   <label>Camera</label>
   <select id="camSel" data-k="camId"><option value="">Back camera (default)</option></select>
   <div class="row">
     <div><label>Resolution</label>
       <select data-k="res">
-        <option value="max">Highest possible</option>
-        <option value="3840x2160">3840 × 2160</option>
-        <option value="1920x1440">1920 × 1440</option>
+        <option value="max">Highest (12 MP) — hottest, may stall</option>
+        <option value="3840x2160">3840 × 2160 — sharper, warm</option>
+        <option value="1920x1440">1920 × 1440 — cool (default)</option>
         <option value="1920x1080">1920 × 1080</option>
       </select></div>
     <div><label>Camera frame rate</label>
@@ -253,6 +274,13 @@
 <details>
   <summary>Detection (stillness &amp; sharpness)</summary>
   <div class="hint">Watch the meters above while you place and hold a card to pick these numbers.</div>
+  <label>Capture speed — how soon a card is read once it is placed</label>
+  <select id="speedPreset">
+    <option value="fastest">Fastest — first sharp frame as soon as it is still</option>
+    <option value="fast">Fast (default) — 2 still checks, sharpest of 2</option>
+    <option value="careful">Careful — 3 still checks, sharpest of 4</option>
+    <option value="custom">Custom (numbers below)</option>
+  </select>
   <label>Motion threshold — below this counts as “still”</label>
   <input type="number" data-k="motionThresh" min="0.5" max="40" step="0.5">
   <label>Still checks needed before capturing</label>
