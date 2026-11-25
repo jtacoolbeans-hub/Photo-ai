@@ -1,0 +1,7 @@
+# Never commit secrets
+.dev.vars
+.env
+*.key
+# Cloudflare local tooling (if ever used)
+.wrangler/
+node_modules/

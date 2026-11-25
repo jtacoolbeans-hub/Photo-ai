@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Phase 0 Camera Test</title>
+<style>
+  :root { color-scheme: dark; --bg:#111; --fg:#eee; --mut:#999; --acc:#4fa3ff; --ok:#4caf50; --bad:#ff5252; --card:#1c1c1c; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:12px 12px 80px; background:var(--bg); color:var(--fg);
+         font:16px -apple-system, system-ui, sans-serif; }
+  h1 { font-size:20px; margin:4px 0 12px; }
+  h2 { font-size:16px; margin:0 0 8px; color:var(--acc); }
+  section { background:var(--card); border-radius:12px; padding:12px; margin-bottom:12px; }
+  label { display:block; margin:8px 0 4px; color:var(--mut); font-size:14px; }
+  input[type=text], input[type=password], select, textarea {
+    width:100%; font-size:16px; padding:10px; border-radius:8px; border:1px solid #333; background:#000; color:var(--fg); }
+  textarea { min-height:90px; }
+  input[type=range] { width:100%; }
+  button { font-size:16px; padding:12px 14px; border-radius:10px; border:0; background:var(--acc); color:#000;
+           font-weight:600; margin:6px 6px 0 0; }
+  button.sec { background:#333; color:var(--fg); }
+  button:disabled { opacity:.4; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .row > * { flex:1 1 140px; }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size:13px; white-space:pre-wrap; word-break:break-word; }
+  .big { font-size:18px; font-weight:600; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .mut { color:var(--mut); }
+  #wrap { position:relative; width:100%; background:#000; border-radius:8px; overflow:hidden; }
+  #video { display:block; width:100%; height:auto; }
+  #crop { position:absolute; border:2px solid #ff0; box-shadow:0 0 0 9999px rgba(0,0,0,.45); pointer-events:none; }
+  #still { width:100%; border-radius:8px; margin-top:8px; display:none; }
+  .hist { display:flex; gap:8px; border-top:1px solid #333; padding-top:8px; margin-top:8px; }
+  .hist img { width:96px; height:auto; border-radius:6px; flex:0 0 auto; }
+  details summary { color:var(--mut); margin-top:8px; }
+</style>
+</head>
+<body>
+<h1>Phase 0 — camera &amp; reading test</h1>
+
+<section>
+  <h2>1. Connection</h2>
+  <label for="workerUrl">Worker URL</label>
+  <input id="workerUrl" type="text" placeholder="https://card-proxy.YOURNAME.workers.dev" autocapitalize="off" autocorrect="off">
+  <label for="token">App token (the APP_TOKEN password you made up)</label>
+  <input id="token" type="password" autocapitalize="off" autocorrect="off">
+  <button id="btnCheck" class="sec">Save &amp; test connection</button>
+  <div id="connStatus" class="mono mut"></div>
+</section>
+
+<section>
+  <h2>2. Camera</h2>
+  <div class="row">
+    <div>
+      <label for="camSel">Camera</label>
+      <select id="camSel"><option value="">Back camera (default)</option></select>
+    </div>
+    <div>
+      <label for="resSel">Resolution to request</label>
+      <select id="resSel">
+        <option value="max">Highest possible</option>
+        <option value="4032x3024">4032 × 3024 (12 MP, 4:3)</option>
+        <option value="3840x2160">3840 × 2160 (4K, 16:9)</option>
+        <option value="1920x1440">1920 × 1440 (4:3)</option>
+        <option value="1920x1080">1920 × 1080 (HD)</option>
+        <option value="1280x720">1280 × 720</option>
+      </select>
+    </div>
+  </div>
+  <button id="btnStart">Start camera</button>
+  <button id="btnStop" class="sec" disabled>Stop</button>
+  <div id="resInfo" class="big" style="margin-top:8px">Not started</div>
+  <div id="wrap" style="margin-top:8px"><video id="video" playsinline muted autoplay></video><div id="crop"></div></div>
+
+  <div id="zoomBox" style="display:none">
+    <label>Zoom: <span id="zoomVal"></span></label>
+    <input id="zoom" type="range">
+  </div>
+  <div id="focusBox" style="display:none">
+    <label>Manual focus distance: <span id="focusVal"></span></label>
+    <input id="focus" type="range">
+  </div>
+  <div id="torchBox" style="display:none">
+    <button id="btnTorch" class="sec">Torch (flashlight) on/off</button>
+  </div>
+
+  <label>Crop width: <span id="cwVal"></span>%</label>
+  <input id="cropW" type="range" min="20" max="100" value="100">
+  <label>Crop height: <span id="chVal"></span>%</label>
+  <input id="cropH" type="range" min="20" max="100" value="100">
+  <label>Crop centre left/right: <span id="cxVal"></span>%</label>
+  <input id="cropX" type="range" min="0" max="100" value="50">
+  <label>Crop centre up/down: <span id="cyVal"></span>%</label>
+  <input id="cropY" type="range" min="0" max="100" value="50">
+
+  <details>
+    <summary>Raw camera details (for troubleshooting)</summary>
+    <div id="caps" class="mono"></div>
+  </details>
+</section>
+
+<section>
+  <h2>3. Capture &amp; send</h2>
+  <div class="row">
+    <div>
+      <label for="delaySel">Delay before capture</label>
+      <select id="delaySel">
+        <option value="0">None</option>
+        <option value="3">3 seconds</option>
+        <option value="5" selected>5 seconds</option>
+        <option value="10">10 seconds</option>
+      </select>
+    </div>
+    <div>
+      <label for="qual">JPEG quality: <span id="qualVal"></span></label>
+      <input id="qual" type="range" min="50" max="100" value="90">
+    </div>
+  </div>
+  <div class="row">
+    <div>
+      <label for="model">Gemini model</label>
+      <input id="model" type="text" value="gemini-flash-latest" autocapitalize="off" autocorrect="off">
+    </div>
+    <div>
+      <label for="mres">Gemini image detail</label>
+      <select id="mres">
+        <option value="">Default</option>
+        <option value="MEDIA_RESOLUTION_HIGH" selected>High</option>
+        <option value="MEDIA_RESOLUTION_MEDIUM">Medium</option>
+        <option value="MEDIA_RESOLUTION_LOW">Low</option>
+      </select>
+    </div>
+  </div>
+  <label><input id="fast" type="checkbox"> Fast mode (turn off Gemini "thinking" — works on 2.5 models; uncheck if you get an error)</label>
+
+  <label for="promptSel">Prompt</label>
+  <select id="promptSel">
+    <option value="transcribe">Transcribe exactly (tests reading accuracy)</option>
+    <option value="qa">Show prompt (Q: / A: / NONE)</option>
+  </select>
+  <textarea id="prompt"></textarea>
+
+  <button id="btnCapture" disabled>Capture only</button>
+  <button id="btnSend" disabled>Capture + send to Gemini</button>
+  <button id="btnResend" class="sec" disabled>Re-send last still</button>
+  <button id="btnSpeak" class="sec" disabled>Speak reply</button>
+
+  <div id="status" class="big" style="margin-top:10px"></div>
+  <div id="reply" class="mono" style="margin-top:8px"></div>
+  <img id="still" alt="captured still">
+</section>
+
+<section>
+  <h2>Results this session</h2>
+  <div class="mut" style="font-size:14px">Not saved — just for comparing tries. Long-press a big still above to save it to Photos.</div>
+  <div id="history"></div>
+</section>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('p0.' + k); return v === null ? d : v; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('p0.' + k, v); } catch {} },
+};
+
+const PROMPTS = {
+  transcribe: 'Transcribe ALL text on the paper card in this photo exactly as printed, keeping line breaks. ' +
+              'Do not correct spelling or add anything. If you cannot read some words, write [?] in their place. ' +
+              'If no card or text is visible, reply NONE.',
+  qa: 'The photo shows a paper card with a printed audience question. Read the question and answer it for a ' +
+      'stage performer who will hear your answer through an earbud.\n' +
+      'Reply in exactly this format and nothing else:\n' +
+      'Q: <the question, exactly as printed>\n' +
+      'A: <a short spoken answer, one or two plain sentences, no lists or symbols>\n' +
+      'If you cannot read the question with confidence, reply with just: NONE',
+};
+
+let stream = null, track = null, torchOn = false;
+let lastStill = null; // { dataUrl, w, h, kb, sharp }
+let lastReply = '';
+
+// ---------- settings ----------
+$('workerUrl').value = store.get('workerUrl', '');
+$('token').value = store.get('token', '');
+$('model').value = store.get('model', 'gemini-flash-latest');
+$('resSel').value = store.get('res', 'max');
+$('qual').value = store.get('qual', '90');
+$('mres').value = store.get('mres', 'MEDIA_RESOLUTION_HIGH');
+$('fast').checked = store.get('fast', '0') === '1';
+$('promptSel').value = store.get('promptSel', 'transcribe');
+$('prompt').value = store.get('prompt.' + $('promptSel').value, PROMPTS[$('promptSel').value]);
+for (const k of ['cropW', 'cropH', 'cropX', 'cropY']) $(k).value = store.get(k, $(k).value);
+
+const saveOn = (id, key, ev = 'change') => $(id).addEventListener(ev, () =>
+  store.set(key, $(id).type === 'checkbox' ? ($(id).checked ? '1' : '0') : $(id).value));
+saveOn('model', 'model'); saveOn('resSel', 'res'); saveOn('qual', 'qual', 'input');
+saveOn('mres', 'mres'); saveOn('fast', 'fast');
+$('promptSel').addEventListener('change', () => {
+  const p = $('promptSel').value;
+  store.set('promptSel', p);
+  $('prompt').value = store.get('prompt.' + p, PROMPTS[p]);
+});
+$('prompt').addEventListener('input', () => store.set('prompt.' + $('promptSel').value, $('prompt').value));
+
+function workerUrl() { return $('workerUrl').value.trim().replace(/\/$/, ''); }
+
+$('btnCheck').onclick = async () => {
+  store.set('workerUrl', workerUrl());
+  store.set('token', $('token').value.trim());
+  const out = $('connStatus');
+  if (!workerUrl()) { out.textContent = 'Enter the Worker URL first.'; return; }
+  out.textContent = 'Checking…';
+  try {
+    const r = await fetch(workerUrl(), { headers: { 'X-App-Token': $('token').value.trim() } });
+    const j = await r.json();
+    const lines = [
+      (j.hasKey ? '✅' : '❌') + ' Gemini key stored in Worker',
+      (j.hasToken ? '✅' : '❌') + ' APP_TOKEN stored in Worker',
+      (j.tokenOk ? '✅' : '❌') + ' Token you typed matches',
+      (j.originOk ? '✅' : '❌') + ' This page is allowed (ALLOWED_ORIGIN)',
+      'Default model: ' + j.defaultModel,
+    ];
+    out.textContent = lines.join('\n');
+    out.className = 'mono ' + (j.hasKey && j.tokenOk && j.originOk ? 'ok' : 'bad');
+  } catch (e) {
+    out.textContent = 'Could not reach the Worker: ' + e.message + '\nCheck the URL (it should start with https://).';
+    out.className = 'mono bad';
+  }
+};
+
+// ---------- crop overlay ----------
+function crop() {
+  const w = +$('cropW').value / 100, h = +$('cropH').value / 100;
+  let cx = +$('cropX').value / 100, cy = +$('cropY').value / 100;
+  const x = Math.min(Math.max(cx - w / 2, 0), 1 - w);
+  const y = Math.min(Math.max(cy - h / 2, 0), 1 - h);
+  return { x, y, w, h };
+}
+function drawCrop() {
+  const c = crop(), el = $('crop');
+  el.style.left = c.x * 100 + '%'; el.style.top = c.y * 100 + '%';
+  el.style.width = c.w * 100 + '%'; el.style.height = c.h * 100 + '%';
+  $('cwVal').textContent = $('cropW').value; $('chVal').textContent = $('cropH').value;
+  $('cxVal').textContent = $('cropX').value; $('cyVal').textContent = $('cropY').value;
+  $('qualVal').textContent = $('qual').value;
+}
+for (const k of ['cropW', 'cropH', 'cropX', 'cropY']) $(k).addEventListener('input', () => { store.set(k, $(k).value); drawCrop(); });
+$('qual').addEventListener('input', drawCrop);
+drawCrop();
+
+// ---------- camera ----------
+async function listCameras() {
+  try {
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+    const sel = $('camSel'), cur = store.get('cam', '');
+    sel.innerHTML = '<option value="">Back camera (default)</option>';
+    devs.forEach((d, i) => {
+      const o = document.createElement('option');
+      o.value = d.deviceId; o.textContent = d.label || ('Camera ' + (i + 1));
+      sel.appendChild(o);
+    });
+    if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+  } catch {}
+}
+$('camSel').addEventListener('change', () => { store.set('cam', $('camSel').value); if (stream) startCamera(); });
+$('resSel').addEventListener('change', () => { if (stream) startCamera(); });
+
+function stopCamera() {
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  stream = null; track = null; torchOn = false;
+  $('video').srcObject = null;
+  $('btnStop').disabled = true; $('btnCapture').disabled = true; $('btnSend').disabled = true;
+  $('resInfo').textContent = 'Stopped';
+}
+
+async function startCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    $('resInfo').innerHTML = '<span class="bad">Camera not available. Open this page in Safari over https.</span>';
+    return;
+  }
+  stopCamera();
+  $('resInfo').textContent = 'Starting…';
+  const res = $('resSel').value;
+  let [W, H] = res === 'max' ? [4032, 3024] : res.split('x').map(Number);
+  const video = { width: { ideal: W }, height: { ideal: H }, frameRate: { ideal: 30 } };
+  const cam = $('camSel').value;
+  if (cam) video.deviceId = { exact: cam }; else video.facingMode = { ideal: 'environment' };
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: false, video });
+  } catch (e) {
+    $('resInfo').innerHTML = '<span class="bad">Camera error: ' + e.name + ' — ' + e.message + '</span>';
+    return;
+  }
+  track = stream.getVideoTracks()[0];
+  const v = $('video');
+  v.srcObject = stream;
+  await v.play().catch(() => {});
+
+  // "Highest possible": ask for whatever the camera says its maximum is.
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  if (res === 'max' && caps.width && caps.height) {
+    try { await track.applyConstraints({ width: { ideal: caps.width.max }, height: { ideal: caps.height.max } }); } catch {}
+  }
+  await new Promise((r) => setTimeout(r, 400));
+  showResolution();
+  setupControls(caps);
+  $('btnStop').disabled = false; $('btnCapture').disabled = false; $('btnSend').disabled = false;
+  listCameras();
+}
+
+function showResolution() {
+  const v = $('video'), s = track.getSettings();
+  const mp = (v.videoWidth * v.videoHeight / 1e6).toFixed(1);
+  $('resInfo').innerHTML = 'Got <span class="ok">' + v.videoWidth + ' × ' + v.videoHeight + '</span> (' + mp +
+    ' MP)' + (s.frameRate ? ', ' + Math.round(s.frameRate) + ' fps' : '');
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  $('caps').textContent = 'label: ' + track.label + '\n\nsettings:\n' + JSON.stringify(s, null, 1) +
+    '\n\ncapabilities:\n' + JSON.stringify(caps, null, 1);
+}
+$('video').addEventListener('resize', () => { if (track) showResolution(); });
+
+function setupControls(caps) {
+  if (caps.zoom) {
+    const z = $('zoom');
+    z.min = caps.zoom.min; z.max = caps.zoom.max; z.step = caps.zoom.step || 0.1;
+    z.value = track.getSettings().zoom || caps.zoom.min;
+    $('zoomVal').textContent = (+z.value).toFixed(1) + '×';
+    $('zoomBox').style.display = '';
+  } else $('zoomBox').style.display = 'none';
+
+  if (caps.focusDistance && caps.focusMode && caps.focusMode.includes('manual')) {
+    const f = $('focus');
+    f.min = caps.focusDistance.min; f.max = caps.focusDistance.max; f.step = caps.focusDistance.step || 0.01;
+    f.value = track.getSettings().focusDistance || caps.focusDistance.min;
+    $('focusVal').textContent = f.value;
+    $('focusBox').style.display = '';
+  } else $('focusBox').style.display = 'none';
+
+  $('torchBox').style.display = caps.torch ? '' : 'none';
+}
+$('zoom').addEventListener('input', async () => {
+  $('zoomVal').textContent = (+$('zoom').value).toFixed(1) + '×';
+  try { await track.applyConstraints({ advanced: [{ zoom: +$('zoom').value }] }); } catch {}
+});
+$('focus').addEventListener('input', async () => {
+  $('focusVal').textContent = $('focus').value;
+  try { await track.applyConstraints({ advanced: [{ focusMode: 'manual', focusDistance: +$('focus').value }] }); } catch {}
+});
+$('btnTorch').onclick = async () => {
+  torchOn = !torchOn;
+  try { await track.applyConstraints({ advanced: [{ torch: torchOn }] }); } catch { torchOn = false; }
+};
+$('btnStart').onclick = startCamera;
+$('btnStop').onclick = stopCamera;
+
+// ---------- capture ----------
+// Sharpness = "variance of the Laplacian": a standard blur score. Higher = sharper.
+// Computed on a ~800px-wide grey copy so it's quick. Only compare numbers from the same setup.
+function sharpness(canvas) {
+  const scale = Math.min(1, 800 / canvas.width);
+  const w = Math.max(3, Math.round(canvas.width * scale)), h = Math.max(3, Math.round(canvas.height * scale));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(canvas, 0, 0, w, h);
+  const d = g.getImageData(0, 0, w, h).data;
+  const grey = new Float32Array(w * h);
+  for (let i = 0, j = 0; j < grey.length; i += 4, j++) grey[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+  let sum = 0, sum2 = 0, n = 0;
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const k = y * w + x;
+    const lap = grey[k - w] + grey[k + w] + grey[k - 1] + grey[k + 1] - 4 * grey[k];
+    sum += lap; sum2 += lap * lap; n++;
+  }
+  const mean = sum / n;
+  return sum2 / n - mean * mean;
+}
+
+function grabStill() {
+  const v = $('video');
+  if (!v.videoWidth) throw new Error('Camera not ready');
+  const c = crop();
+  const sx = Math.round(c.x * v.videoWidth), sy = Math.round(c.y * v.videoHeight);
+  const sw = Math.round(c.w * v.videoWidth), sh = Math.round(c.h * v.videoHeight);
+  const canvas = document.createElement('canvas');
+  canvas.width = sw; canvas.height = sh;
+  canvas.getContext('2d').drawImage(v, sx, sy, sw, sh, 0, 0, sw, sh);
+  const dataUrl = canvas.toDataURL('image/jpeg', +$('qual').value / 100);
+  const kb = Math.round(dataUrl.length * 0.75 / 1024);
+  const sharp = sharpness(canvas);
+  const thumb = document.createElement('canvas');
+  thumb.width = 192; thumb.height = Math.round(192 * sh / sw);
+  thumb.getContext('2d').drawImage(canvas, 0, 0, thumb.width, thumb.height);
+  return { dataUrl, w: sw, h: sh, kb, sharp, thumb: thumb.toDataURL('image/jpeg', 0.7) };
+}
+
+function status(msg, cls = '') { $('status').className = 'big ' + cls; $('status').textContent = msg; }
+
+async function countdown() {
+  let n = +$('delaySel').value;
+  while (n > 0) { status('Capturing in ' + n + '…'); beep(660, 0.06); await new Promise((r) => setTimeout(r, 1000)); n--; }
+}
+
+async function doCapture() {
+  await countdown();
+  lastStill = grabStill();
+  beep(990, 0.08);
+  $('still').src = lastStill.dataUrl; $('still').style.display = 'block';
+  $('btnResend').disabled = false;
+  status('Captured ' + lastStill.w + '×' + lastStill.h + ', ' + lastStill.kb + ' KB, sharpness ' + Math.round(lastStill.sharp));
+}
+
+async function sendStill() {
+  if (!lastStill) return;
+  if (!workerUrl()) { status('Set the Worker URL in step 1 first.', 'bad'); return; }
+  const genCfg = { temperature: 0, maxOutputTokens: 600 };
+  if ($('mres').value) genCfg.mediaResolution = $('mres').value;
+  if ($('fast').checked) genCfg.thinkingConfig = { thinkingBudget: 0 };
+  status('Sending ' + lastStill.kb + ' KB to Gemini…');
+  $('reply').textContent = '';
+  const t0 = performance.now();
+  let j, ok = false;
+  try {
+    const r = await fetch(workerUrl(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-App-Token': $('token').value.trim() },
+      body: JSON.stringify({
+        image: lastStill.dataUrl, prompt: $('prompt').value, model: $('model').value.trim(),
+        generationConfig: genCfg, timeoutMs: 30000,
+      }),
+    });
+    j = await r.json();
+    ok = r.ok;
+  } catch (e) { j = { error: e.message }; }
+  const ms = Math.round(performance.now() - t0);
+  if (ok) {
+    lastReply = j.text || '';
+    status('Reply in ' + (ms / 1000).toFixed(1) + ' s (Gemini ' + (j.geminiMs / 1000).toFixed(1) + ' s)', 'ok');
+    $('reply').textContent = lastReply || '(empty reply — finishReason: ' + j.finishReason + ')';
+    $('btnSpeak').disabled = !lastReply;
+    beep(520, 0.08); setTimeout(() => beep(780, 0.12), 110);
+  } else {
+    lastReply = '';
+    status('Failed after ' + (ms / 1000).toFixed(1) + ' s', 'bad');
+    $('reply').textContent = j.error || JSON.stringify(j);
+    beep(200, 0.3);
+  }
+  addHistory(lastStill, ms, j, ok);
+}
+
+function addHistory(s, ms, j, ok) {
+  const div = document.createElement('div'); div.className = 'hist';
+  const img = document.createElement('img'); img.src = s.thumb;
+  const txt = document.createElement('div'); txt.className = 'mono';
+  txt.textContent = s.w + '×' + s.h + ' · ' + s.kb + ' KB · sharp ' + Math.round(s.sharp) + ' · ' +
+    (ms / 1000).toFixed(1) + ' s · ' + $('model').value + '\n' + (ok ? (j.text || '(empty)') : '❌ ' + (j.error || ''));
+  div.append(img, txt);
+  $('history').prepend(div);
+}
+
+$('btnCapture').onclick = () => doCapture().catch((e) => status(e.message, 'bad'));
+$('btnSend').onclick = () => doCapture().then(sendStill).catch((e) => status(e.message, 'bad'));
+$('btnResend').onclick = () => sendStill();
+
+// ---------- sound ----------
+let actx = null;
+function beep(freq, dur) {
+  try {
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === 'suspended') actx.resume();
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.frequency.value = freq; o.type = 'sine';
+    g.gain.setValueAtTime(0.0001, actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.3, actx.currentTime + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + dur);
+    o.connect(g).connect(actx.destination); o.start(); o.stop(actx.currentTime + dur + 0.02);
+  } catch {}
+}
+$('btnSpeak').onclick = () => {
+  let text = lastReply;
+  const a = text.match(/^\s*A:\s*([\s\S]*)$/m);
+  if (a) text = a[1];
+  speechSynthesis.cancel();
+  speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+};
+</script>
+</body>
+</html>
