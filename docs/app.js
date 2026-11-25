@@ -14,8 +14,9 @@
  */
 'use strict';
 
-const APP_VERSION = '1.9.1';
+const APP_VERSION = '1.9.2';
 const MIN_WORKER_VERSION = 5;
+const RECOMMENDED_WORKER_VERSION = 7; // 7 = tries several Cloudflare voice models, skips retired ones
 
 // The first version of the prompt. Phones that saved it get the new one automatically.
 const OLD_PROMPT_V1 =
@@ -78,7 +79,7 @@ const DEFAULTS = {
   models: 'gemini-3.5-flash, gemini-flash-latest',
   mediaResolution: 'MEDIA_RESOLUTION_HIGH', thinking: 'minimal', maxTokens: 2048,
   prompt: DEFAULT_PROMPT, style: '', allItems: true,
-  voiceEngine: 'cf', cfModel: '@cf/myshell-ai/melotts', cfVoice: 'angus', ttsVoice: 'Kore', ttsModel: 'gemini-2.5-flash-preview-tts', pauseLoopForSpeech: true, audioSessionMode: 'playback', freezeMode: 'speech',
+  voiceEngine: 'cf', cfModel: '@cf/deepgram/aura-2-en', cfVoice: 'luna', ttsVoice: 'Kore', ttsModel: 'gemini-2.5-flash-preview-tts', pauseLoopForSpeech: true, audioSessionMode: 'playback', freezeMode: 'speech',
   maxSide: 2048, jpegQuality: 85,
   timeoutSec: 8, stallLine: 'Great question. Give me just a second with that one.',
   lateAnswer: true, lateSec: 15, retryNone: 1,
@@ -93,7 +94,7 @@ for (const k of CUE_KEYS) DEFAULTS['cue_' + k] = 'tone';
 
 // ---------------------------------------------------------------- settings
 const LS_KEY = 'cardAssistant.settings.v1';
-const SETTINGS_VER = 7;
+const SETTINGS_VER = 8;
 let S = loadSettings();
 function loadSettings() {
   let saved = {};
@@ -107,6 +108,10 @@ function loadSettings() {
     }
     if ([OLD_PROMPT_V1, OLD_QUESTION_V2, OLD_ANYTHING_V3].includes(saved.prompt)) delete saved.prompt;
     if ((saved.v || 1) < 4 && saved.maxTokens === 1024) delete saved.maxTokens; // longer pages need room for many answers
+    if ((saved.v || 1) < 8) { // Cloudflare retired MeloTTS: move to Aura, whose speaker names differ
+      if (!saved.cfModel || /melotts/i.test(saved.cfModel)) delete saved.cfModel;
+      if (saved.cfVoice === 'angus') delete saved.cfVoice;
+    }
     if ((saved.v || 1) < 7 && saved.voiceEngine !== 'device') delete saved.voiceEngine; // Gemini voice hit its free limits: Cloudflare voice is the default now
     if ((saved.v || 1) < 6) delete saved.voiceEngine; // the iPhone voice turned out silent while the camera runs: Gemini voice is the default now
     if ((saved.v || 1) < 5) delete saved.pauseLoopForSpeech; // now on by default: the background sound was cutting into speech
@@ -138,7 +143,7 @@ function onSettingChanged(k) {
   if (k === 'camId' || k === 'res' || k === 'camFps') { safeMode = false; if (running) startCamera().catch((e) => { camNote = 'Camera error: ' + e.message; setSub(); }); }
   if (k === 'torch') applyTorch();
   if (k === 'useCrop') drawCropBox();
-  if (['stallLine', 'voiceEngine', 'ttsVoice', 'ttsModel', 'cfModel', 'cfVoice', 'workerUrl', 'token'].includes(k)) { engineDown.cf = ''; engineDown.gemini = ''; checkWorker().then(prewarmVoice); }
+  if (['stallLine', 'voiceEngine', 'ttsVoice', 'ttsModel', 'cfModel', 'cfVoice', 'workerUrl', 'token'].includes(k)) { engineDown.cf = ''; engineDown.gemini = ''; engineBackoff.cf = engineBackoff.gemini = 0; checkWorker().then(prewarmVoice); }
   if (k === 'audioSessionMode') setAudioSession();
 }
 
@@ -363,8 +368,16 @@ async function checkWorker() {
 }
 const engineDown = { cf: '', gemini: '' }; // set when an engine can't be used this session (daily limit, not connected)
 function netVoice() { return (S.voiceEngine === 'cf' || S.voiceEngine === 'gemini') && !!S.workerUrl; }
+const engineBackoff = { cf: 0, gemini: 0 }, engineFails = { cf: 0, gemini: 0 }; // temporary pauses (a failing voice isn't hammered)
 function voiceOrder() { // the chosen voice first, the other online voice as backup
-  return (S.voiceEngine === 'gemini' ? ['gemini', 'cf'] : ['cf', 'gemini']).filter((e) => !engineDown[e]);
+  const list = (S.voiceEngine === 'gemini' ? ['gemini', 'cf'] : ['cf', 'gemini']).filter((e) => !engineDown[e]);
+  const live = list.filter((e) => Date.now() >= engineBackoff[e]);
+  return live.length ? live : list; // if every voice is pausing, still try rather than stay silent
+}
+function quotaWaitMs(m) { // "retry in 53.3s" -> 53300
+  const r = /retry in ([\d.]+h)?([\d.]+m)?([\d.]+s)?/i.exec(String(m || ''));
+  if (!r) return 60000;
+  return ((parseFloat(r[1] || 0) * 3600) + (parseFloat(r[2] || 0) * 60) + parseFloat(r[3] || 0)) * 1000 || 60000;
 }
 function isQuota(m) { return /quota|exceeded|rate.?limit|RESOURCE_EXHAUSTED|\b429\b/i.test(String(m || '')); }
 // Turn Google's long error texts into one short line.
@@ -381,6 +394,8 @@ function friendlyError(m) {
     }
     return 'Gemini free ' + (what ? what + ' ' : '') + 'limit reached' + (model ? ' (' + model + ')' : '') + wait;
   }
+  if (/no model worked/i.test(m)) return 'no Cloudflare voice model worked — ' + m.split('—').slice(1).join('—').trim().slice(0, 140);
+  if (/deprecat|retired/i.test(m)) return 'voice model retired' + (/@cf\/[\w.\-\/]+/.exec(m) ? ' (' + /@cf\/[\w.\-\/]+/.exec(m)[0] + ')' : '') + ' — update the Worker (proxy.js)';
   return m.length > 160 ? m.slice(0, 157) + '…' : m;
 }
 // Say one line with the first voice that works; skip a voice for the rest of the session if it is out of quota.
@@ -394,11 +409,14 @@ async function playVoice(text, firstJob) {
         await playJob(job);
         if (/^Voice/.test(speechNote)) speechNote = '';
         return;
+        engineFails[eng] = 0;
       } catch (e) {
-        const msg = friendlyError(e.message);
-        errs.push((eng === 'cf' ? 'Cloudflare' : 'Gemini') + ': ' + msg);
-        sev((eng === 'cf' ? 'Cloudflare' : 'Gemini') + ' voice failed: ' + msg);
-        if (isQuota(e.message) || /not connected|out of date/i.test(e.message)) { engineDown[eng] = msg; break; }
+        const msg = friendlyError(e.message), who = eng === 'cf' ? 'Cloudflare' : 'Gemini';
+        errs.push(who + ': ' + msg);
+        sev(who + ' voice failed: ' + String(e.message).slice(0, 300));
+        if (/not connected|out of date/i.test(e.message) || (isQuota(e.message) && /per.?day|PerDay/i.test(e.message))) { engineDown[eng] = msg; break; }
+        if (isQuota(e.message)) { engineBackoff[eng] = Date.now() + Math.min(quotaWaitMs(e.message) + 2000, 120000); break; } // per-minute: wait it out
+        if (++engineFails[eng] >= 2) { engineBackoff[eng] = Date.now() + 45000; engineFails[eng] = 0; sev(who + ' voice paused for 45 s after repeated failures'); break; }
       }
     }
   }
@@ -431,6 +449,7 @@ function voiceJob(text, opts = {}) {
       });
       if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || 'HTTP ' + r.status); }
       const ct = r.headers.get('Content-Type') || '';
+      job.model = r.headers.get('X-Cf-Model') || '';
       if (/L16|pcm/i.test(ct) && r.body && r.body.getReader) {
         job.mode = 'streamed';
         const rate = +((/rate=(\d+)/.exec(ct) || [])[1] || 24000);
@@ -486,7 +505,7 @@ async function playJob(job) {
       const src = c.createBufferSource(); src.buffer = b; src.connect(c.destination);
       if (!any || t < c.currentTime + 0.01) t = c.currentTime + (any ? 0.01 : 0.05);
       src.start(t); t += b.duration;
-      if (!any) sev('voice "' + job.text.slice(0, 24) + '" — ' + (job.mode || '?') + ', first sound after ' + job.firstMs + ' ms');
+      if (!any) sev('voice "' + job.text.slice(0, 24) + '" — ' + (job.mode || '?') + (job.model ? ' [' + job.model.split('/').pop() + ']' : '') + ', first sound after ' + job.firstMs + ' ms');
       any = true;
     }
     if (job.done) break;
@@ -1220,7 +1239,7 @@ async function runAudioCheck() {
     try {
       const job = voiceJob(['', '', 'Two', 'Three'][n] + '. ' + name + '. ' + stamp, { engine: eng, stream: eng === 'gemini' });
       await playJob(job);
-      log(n + '. ' + name + ' — played, ' + job.mode + ', first sound after ' + job.firstMs + ' ms');
+      log(n + '. ' + name + (job.model ? ' (' + job.model + ')' : '') + ' — played, ' + job.mode + ', first sound after ' + job.firstMs + ' ms');
     } catch (e) { log(n + '. ' + name + ' — FAILED: ' + friendlyError(e.message)); }
     await sleep(300);
   }
@@ -1243,7 +1262,7 @@ $('acApply').onclick = () => {
   else msg = 'Nothing worked yet. Check: the silent switch on the left side of the phone (orange = silent), the volume while something plays, and Control Center → the audio-output icon is set to your earbuds. Then run the check again.';
   if (!h(1)) msg += ' You also did not hear the beep — check the volume and that the earbuds are the audio output.';
   saveSettings(); syncInputs(['voiceEngine', 'pauseLoopForSpeech', 'audioSessionMode']); setAudioSession();
-  engineDown.cf = ''; engineDown.gemini = ''; checkWorker().then(prewarmVoice);
+  engineDown.cf = ''; engineDown.gemini = ''; engineBackoff.cf = engineBackoff.gemini = 0; checkWorker().then(prewarmVoice);
   acReport += '\nHeard: ' + [1, 2, 3, 4].filter(h).join(', ') + '\n' + msg;
   $('acMsg').textContent = msg;
 };
@@ -1275,8 +1294,9 @@ $('btnTestConn').onclick = async () => {
       (j.originOk ? '✅' : '❌') + ' This page is allowed',
       ((j.version || 1) >= MIN_WORKER_VERSION ? '✅ Worker is up to date' : '❌ Worker is OUT OF DATE — paste the new worker/proxy.js into Cloudflare'),
       ((j.version || 1) < MIN_WORKER_VERSION ? '❌ Cloudflare voice needs the new Worker code first' : j.ai ? '✅ Cloudflare voice connected' : '❌ Cloudflare voice not connected — add a Workers AI binding (see README)'),
+      ((j.version || 1) >= MIN_WORKER_VERSION && (j.version || 1) < RECOMMENDED_WORKER_VERSION ? '⚠ Worker v' + j.version + ' — paste the newest proxy.js so retired voice models are skipped automatically' : ''),
     ];
-    out.textContent = lines.join('\n');
+    out.textContent = lines.filter(Boolean).join('\n');
   } catch (e) { out.textContent = '❌ Could not reach the Worker: ' + e.message; }
 };
 

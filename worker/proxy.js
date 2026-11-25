@@ -31,12 +31,15 @@
  *   GEMINI_TTS_MODEL (Text, optional) default voice model, e.g. gemini-2.5-flash-preview-tts
  *   POST / with { tts: "words", engine: "cf" } -> Cloudflare Workers AI voice instead of Gemini.
  *     Needs a Workers AI binding (Worker -> Settings -> Bindings -> Add -> Workers AI). Any name works.
+ *     cfModel may be one model or a comma-separated list; retired/missing models are skipped automatically.
  */
 
-const WORKER_VERSION = 6;
+const WORKER_VERSION = 7;
 const DEFAULT_MODEL = 'gemini-flash-latest';
 const DEFAULT_TTS_MODEL = 'gemini-2.5-flash-preview-tts';
-const DEFAULT_CF_TTS = '@cf/myshell-ai/melotts'; // Cloudflare Workers AI voice (free daily allowance)
+// Cloudflare Workers AI voices, best first. Models get retired from time to time, so we try them in turn,
+// skip any that are gone, and remember which ones work.
+const CF_TTS_MODELS = ['@cf/deepgram/aura-2-en', '@cf/deepgram/aura-1', '@cf/myshell-ai/melotts'];
 const MAX_BODY_BYTES = 15 * 1024 * 1024; // ~15 MB of JSON (base64 photo)
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/';
 
@@ -52,7 +55,7 @@ export default {
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, X-App-Token',
       'Access-Control-Max-Age': '86400',
-      'Access-Control-Expose-Headers': 'X-Tts-Mode, X-Gemini-Ms',
+      'Access-Control-Expose-Headers': 'X-Tts-Mode, X-Gemini-Ms, X-Cf-Model',
       'Vary': 'Origin',
     };
     const json = (obj, status = 200) =>
@@ -166,27 +169,70 @@ function getAI(env) {
   for (const v of Object.values(env || {})) if (v && typeof v === 'object' && typeof v.run === 'function') return v;
   return null;
 }
+const cfBad = new Map(); // model -> when it was found retired/missing (remembered for a while in this Worker)
+const CF_GONE = /deprecat|retired|no such model|not found|unknown model|does not exist|\b50(28|07|06)\b/i;
+async function cfBytes(out) {
+  if (out && typeof out.getReader === 'function') return new Uint8Array(await new Response(out).arrayBuffer());
+  if (out instanceof ArrayBuffer) return new Uint8Array(out);
+  if (out instanceof Uint8Array) return out;
+  if (out && typeof out.audio === 'string') return b64ToBytes(out.audio);
+  return null;
+}
+// One model, with the input shape its family expects. Returns audio bytes or throws.
+async function cfTry(AI, model, text, voice) {
+  const aura = /aura|deepgram/i.test(model);
+  const inputs = aura
+    ? [{ text, speaker: voice, encoding: 'mp3' }, { text, encoding: 'mp3' }]  // second: without the speaker, in case that name isn't valid for this model
+    : [{ prompt: text, lang: 'en' }, { text }];
+  let lastErr;
+  for (let i = 0; i < inputs.length; i++) {
+    if (aura && i === 1 && !voice) break;
+    try {
+      const bytes = await cfBytes(await AI.run(model, inputs[i]));
+      if (bytes && bytes.length >= 100) return bytes;
+      lastErr = new Error('returned no audio');
+    } catch (e) {
+      lastErr = e;
+      if (CF_GONE.test((e && e.message) || '')) break; // the model itself is gone: other input shapes won't help
+    }
+  }
+  throw lastErr || new Error('failed');
+}
+// If every known model is gone, ask Cloudflare which text-to-speech models exist now (if the binding can tell us).
+async function cfDiscover(AI) {
+  try {
+    if (typeof AI.models !== 'function') return [];
+    const res = await AI.models({ search: 'tts' });
+    const arr = Array.isArray(res) ? res : (res && (res.result || res.models)) || [];
+    return arr.map((m) => String(m.name || m.id || m || '')).filter((n) => /^@cf\/[\w.\-\/]{3,80}$/.test(n) && /tts|aura|melo|speech|voice/i.test(n)).slice(0, 6);
+  } catch { return []; }
+}
 async function handleCfTts(env, body, cors, json) {
   const AI = getAI(env);
   if (!AI) return json({ error: 'Cloudflare voice is not connected: add a Workers AI binding to this Worker' }, 501);
   const text = String(body.tts).trim().slice(0, 2000);
   if (!text) return json({ error: 'No text to speak' }, 400);
-  const model = /^@cf\/[\w.\-\/]{3,80}$/.test(String(body.cfModel || '')) ? String(body.cfModel) : DEFAULT_CF_TTS;
-  const input = /aura/i.test(model)
-    ? { text, speaker: /^[a-z\-]{2,30}$/.test(String(body.cfVoice || '')) ? String(body.cfVoice) : 'angus', encoding: 'mp3' }
-    : { prompt: text, lang: 'en' };
-  const t0 = Date.now();
-  let out;
-  try { out = await AI.run(model, input); }
-  catch (e) { return json({ error: 'Cloudflare voice failed: ' + ((e && e.message) || String(e)) }, 502); }
-  let bytes = null;
-  if (out && typeof out.getReader === 'function') bytes = new Uint8Array(await new Response(out).arrayBuffer());
-  else if (out instanceof ArrayBuffer) bytes = new Uint8Array(out);
-  else if (out instanceof Uint8Array) bytes = out;
-  else if (out && typeof out.audio === 'string') bytes = b64ToBytes(out.audio);
-  if (!bytes || bytes.length < 100) return json({ error: 'Cloudflare voice returned no audio' }, 502);
-  const ct = (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46) ? 'audio/wav' : 'audio/mpeg';
-  return new Response(bytes, { headers: { ...cors, 'Content-Type': ct, 'Cache-Control': 'no-store', 'X-Tts-Mode': 'file', 'X-Gemini-Ms': String(Date.now() - t0) } });
+  const voice = /^[a-z\-]{2,30}$/.test(String(body.cfVoice || '')) ? String(body.cfVoice) : 'luna';
+  const wanted = String(body.cfModel || '').split(',').map((m) => m.trim()).filter((m) => /^@cf\/[\w.\-\/]{3,80}$/.test(m));
+  const t0 = Date.now(), errs = [], tried = new Set();
+  const attempt = async (model) => {
+    if (tried.has(model)) return null;
+    tried.add(model);
+    if (cfBad.has(model) && Date.now() - cfBad.get(model) < 15 * 60 * 1000) { errs.push(model + ': retired (skipped)'); return null; }
+    try {
+      const bytes = await cfTry(AI, model, text, voice);
+      const ct = (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46) ? 'audio/wav' : 'audio/mpeg';
+      return new Response(bytes, { headers: { ...cors, 'Content-Type': ct, 'Cache-Control': 'no-store', 'X-Tts-Mode': 'file', 'X-Cf-Model': model, 'X-Gemini-Ms': String(Date.now() - t0) } });
+    } catch (e) {
+      const msg = ((e && e.message) || String(e)).slice(0, 140);
+      errs.push(model + ': ' + msg);
+      if (CF_GONE.test(msg)) cfBad.set(model, Date.now());
+      return null;
+    }
+  };
+  for (const m of [...wanted, ...CF_TTS_MODELS]) { const r = await attempt(m); if (r) return r; }
+  for (const m of await cfDiscover(AI)) { const r = await attempt(m); if (r) return r; }
+  return json({ error: 'Cloudflare voice: no model worked — ' + errs.join(' | ') }, 502);
 }
 
 // Text -> speech with Gemini, returned as a WAV file.

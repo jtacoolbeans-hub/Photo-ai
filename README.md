@@ -175,6 +175,17 @@ quota, no extra key. Gemini's voice is kept as the backup. One-time setup on you
 If a voice runs out of its free allowance, the app stops asking it for the rest of the session and uses the
 other one; the status line shows a short message such as "Gemini free daily limit reached — resets in 11 h 47 m".
 
+### Cloudflare retires voice models (Worker version 7)
+
+Cloudflare switches old Workers AI models off from time to time (MeloTTS stopped working on 2026-11-20). The
+newest `worker/proxy.js` therefore tries several voices in turn (**aura-2-en**, then **aura-1**, then
+MeloTTS), skips any that are retired, remembers which work, and as a last resort asks Cloudflare which
+text-to-speech models exist today. The audio check shows which one played, e.g. `Cloudflare voice (@cf/deepgram/aura-1)`.
+You can put your own choice first under **Cloudflare voice model(s)** (comma-separated; see the *Workers AI
+Catalog* linked in the Worker's Bindings page). If a voice keeps failing the app pauses it for 45 seconds
+instead of retrying every line, and uses the other voice meanwhile. A per-minute Gemini limit is simply waited out.
+**To get this, paste the newest `worker/proxy.js` into Cloudflare again** (the app already moved you off the retired model).
+
 ### Card reading limits (Gemini)
 
 Reading cards also uses Gemini, and its free tier is small too (your error showed 20 a day for
