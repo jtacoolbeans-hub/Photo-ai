@@ -20,6 +20,8 @@ in the real venue lighting before the first show.
 - [ ] **Accessibility → Spoken Content → Voices**: download an "Enhanced" English voice, then pick it
       in the app under **Speech & sounds → Voice** (if it appears in the list). It sounds much more natural.
 - [ ] **Safari → Camera → Allow** (so it doesn't ask every time)
+- [ ] **Ringer/silent switch** off silent and volume up. iOS can mute speech otherwise.
+- [ ] Use Safari or the Home Screen icon consistently. If the camera stops after you leave the app, tap the orange panel or press any key.
 - [ ] Close music apps. If another app is playing audio, the earbud buttons go to it instead.
 
 ## Setup in the box (about 15 minutes before)
@@ -70,6 +72,8 @@ You can change these in **Earbud buttons**.
 A keyboard or Bluetooth page-turner paired to the phone works too. **Space / Enter** = single press,
 **→ / Page Down** = double, **← / Page Up** = triple. Letters: **A** arm/disarm, **C** capture,
 **R** repeat, **S** show mode, **K** restart camera, **Esc** leave show mode. Turn it off under **Keyboard & clicker**.
+
+**8BitDo / other controllers:** pair in iPhone Settings → Bluetooth, tap START, then under **Keyboard & clicker → Your own buttons** tap **Learn** next to each action and press the button you want.
 
 ## Heat
 

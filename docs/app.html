@@ -93,6 +93,21 @@
   table.keys { width:100%; border-collapse:collapse; margin-top:8px; font-size:14px; }
   table.keys td { padding:6px 4px; border-top:1px solid var(--line); vertical-align:top; } table.keys td:first-child { white-space:nowrap; }
   kbd { background:#000; border:1px solid var(--line); border-radius:5px; padding:1px 6px; font:12px ui-monospace, Menlo, monospace; }
+  [hidden] { display:none !important; }
+  #camLost { display:flex; flex-direction:column; gap:4px; text-align:center; margin-top:8px; padding:14px; border-radius:12px;
+             background:#2b1d00; border:2px solid var(--warn); color:var(--fg); cursor:pointer; font-size:15px; }
+  #camLost b { font-size:18px; color:var(--warn); } #camLost .small { font-size:12px; color:var(--mut); }
+  .ahead { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+  .ahead h2 { margin:0; } .ahead button { margin:0; padding:6px 10px; font-size:13px; }
+  #answerBody { max-height:40vh; overflow-y:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
+  #reader { position:fixed; inset:0; z-index:70; background:#0a0a0a; display:flex; flex-direction:column; }
+  #reader .rbar { display:flex; justify-content:space-between; padding:calc(env(safe-area-inset-top) + 8px) 12px 8px; border-bottom:1px solid var(--line); }
+  #reader .rbar button { margin:0 0 0 6px; }
+  #rBody { flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:14px 14px calc(env(safe-area-inset-bottom) + 40px); }
+  #rCard { color:var(--mut); font-size:16px; margin-bottom:10px; } #rAnswer { font-weight:600; line-height:1.4; white-space:pre-wrap; word-break:break-word; }
+  #rRaw { white-space:pre-wrap; word-break:break-word; font-size:13px; color:var(--mut); }
+  .bindrow { display:grid; grid-template-columns:1fr auto auto; gap:4px 8px; align-items:center; margin-top:10px; font-size:14px; }
+  .bindrow span { grid-column:1 / -1; order:3; } .bindrow button { margin:0; padding:7px 12px; font-size:13px; }
   #show { position:fixed; inset:0; background:#000; z-index:50; display:none; }
   #show .tiny { position:absolute; left:12px; bottom:calc(env(safe-area-inset-bottom) + 10px); color:#1c1c1c; font-size:12px; }
   body.showmode #stage.on #video, body.showmode #video { position:fixed; width:2px !important; height:2px !important; min-height:0 !important; max-height:2px !important; opacity:0.01; top:0; left:0; }
@@ -112,6 +127,9 @@
     <div id="cropBox"></div>
     <div id="drawHint">Drag on the picture to draw the crop box</div>
   </div>
+  <div id="camLost" hidden><b>Camera disconnected</b><span id="camLostWhy"></span>
+    <span>Tap here, or press any key, to reconnect.</span>
+    <span class="small">Still failing? In Safari tap <b>aA</b> → <b>Website Settings</b> → <b>Camera</b> → <b>Allow</b>, and use a Safari tab rather than the Home Screen icon.</span></div>
   <div class="meters">
     <div><b id="mMotion">–</b><span>motion</span><div class="bar"><i id="barMotion"></i></div></div>
     <div><b id="mSharp">–</b><span>sharp</span><div class="bar"><i id="barSharp"></i></div></div>
@@ -136,11 +154,16 @@
 </section>
 
 <section id="answerCard">
-  <h2>Last answer</h2>
-  <div id="lastQ">–</div>
-  <div id="lastA">–</div>
+  <div class="ahead"><h2>Last answer</h2><button id="btnReader">⤢ Expand</button></div>
+  <div id="answerBody"><div id="lastQ">–</div><div id="lastA">–</div></div>
   <div class="hint" id="lastInfo"></div>
 </section>
+
+<div id="reader" hidden>
+  <div class="rbar"><button id="rClose">✕ Close</button><span><button id="rSmall">A−</button><button id="rBig">A+</button></span></div>
+  <div id="rBody"><div id="rCard"></div><div id="rAnswer"></div><div id="rInfo" class="hint"></div>
+    <details><summary>Raw reply from Gemini</summary><pre id="rRaw"></pre></details></div>
+</div>
 
 <h2 class="settings-title">Settings</h2>
 <details>
@@ -214,11 +237,13 @@
     <div><label>Tone volume (0–1)</label><input type="number" data-k="toneVol" min="0" max="1" step="0.05"></div>
   </div>
   <label class="chk"><input type="checkbox" data-k="speakQuestion"> Speak the question before the answer</label>
+  <label class="chk"><input type="checkbox" data-k="sayReady"> Say “Ready” when the app starts (confirms speech works)</label>
   <label class="chk"><input type="checkbox" data-k="thinkTicks"> Soft tick every 2 s while waiting for Gemini</label>
   <label>Cues — choose what each one does (▶ tries it)</label>
   <div id="cueList"></div>
   <div class="hint" id="vibNote"></div>
   <button id="btnTestVoice">Test voice</button>
+  <div class="hint mono" id="speechInfo"></div>
 </details>
 
 <details>
@@ -254,8 +279,14 @@
     <tr><td><kbd>R</kbd></td><td>Repeat last answer</td></tr>
     <tr><td><kbd>S</kbd></td><td>Show mode on / off (or START)</td></tr>
     <tr><td><kbd>K</kbd></td><td>Restart camera</td></tr>
-    <tr><td><kbd>Esc</kbd></td><td>Leave show mode</td></tr>
+    <tr><td><kbd>Esc</kbd></td><td>Leave show mode / close the answer reader</td></tr>
   </table>
+  <h2 style="margin-top:16px">Your own buttons (8BitDo, clicker…)</h2>
+  <div class="hint">Tap <b>Learn</b>, then press the button you want. Works whether the pad acts as a keyboard or as a gamepad. Gamepad buttons work after START; they can't start the app (iOS needs a real tap or key for that).</div>
+  <label class="chk"><input type="checkbox" data-k="gamepad"> Controller (gamepad) buttons on</label>
+  <div id="bindList"></div>
+  <div class="hint" id="learnMsg"></div>
+  <div class="hint" id="padInfo">No controller seen yet — press a button on it.</div>
 </details>
 
 <details>

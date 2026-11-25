@@ -137,6 +137,36 @@ tick, answer, failed) to **Sound** or **Off**. iPhone Safari does not allow web 
 vibrate the phone, so there is no vibration option on iPhone; on phones whose browser supports
 it (e.g. Android) **Vibrate** and **Sound + vibrate** appear automatically.
 
+### 8BitDo (or any Bluetooth controller / clicker)
+
+1. Put the controller in a Bluetooth mode your iPhone understands. Many 8BitDo pads have a **keyboard**
+   mode and a **Switch / iOS-style gamepad** mode; how you switch differs by model, so check its manual.
+   Then iPhone **Settings → Bluetooth** and tap the controller's name to pair.
+2. Open the show app and tap **START**. (A controller in keyboard mode can press START itself; a
+   gamepad-mode controller can't, because iOS needs a real tap or key press to start the camera and sound.)
+3. Open **Keyboard & clicker → Your own buttons**. Next to **Arm / disarm**, tap **Learn**, then press the
+   button you want. It says "Saved: …". Do the same for **Capture now** and **Repeat last answer**.
+   This works for both keyboard-style and gamepad-style buttons, so you don't need to know which keys it sends.
+4. In gamepad mode Safari only "sees" the pad after you press a button on it. If it says *No controller
+   seen yet*, press any button with the app open in front.
+5. Without learning anything, gamepad button **A/0** arms, **B/1** captures and **Y/3** repeats.
+   Turn controller buttons off with **Controller (gamepad) buttons on**.
+
+### If the camera disconnects
+
+After you leave the app (a call, another app, locking the phone), iOS can refuse to give the camera back
+until you touch the page again. The app then shows an orange **Camera disconnected** panel: tap it, or
+press any key, and it reconnects. It also keeps retrying quietly. If it keeps happening, use a **Safari tab**
+instead of the Home Screen icon (Home Screen apps re-ask for camera permission), and in Safari tap **aA →
+Website Settings → Camera → Allow**.
+
+### Speech
+
+At START it says "Ready" so you know speech works. If iOS swallows speech, the app resets it and tries
+again, and shows a warning if it still won't start. Check the **ringer/silent switch** and the volume, then tap
+**Speech & sounds → Test voice**. Long answers can be read in full: tap **⤢ Expand** under *Last answer*
+(it also scrolls, and has A− / A+ for text size).
+
 ### Camera freezes
 
 The app watches the camera. If the picture freezes, goes black, or iOS stops the camera, it
@@ -177,7 +207,8 @@ lighting.
 | ❌ Worker is OUT OF DATE | Paste the new `worker/proxy.js` into Cloudflare (Step 3). |
 | "model not found" | Fix the names under **Gemini → Models to try**. |
 | "high demand" | Add a second model to the list; the Worker falls back automatically. |
-| Camera error / black video | iPhone Settings → Apps → Safari → Camera → **Allow**, reload. |
+| Camera error / black video | Tap the orange **Camera disconnected** panel, or press any key. Then iPhone Settings → Apps → Safari → Camera → **Allow**, reload. |
+| No speech | Check the ringer switch and volume, tap **Test voice**, and look for a ⚠ line under the status. |
 | Earbud buttons do nothing | Tap START again; close music/podcast apps; check the earbuds are connected. |
 | "Screen lock: NOT held" | Set iPhone Auto-Lock to **Never** (Settings → Display & Brightness). |
 | Reads the empty box / never captures | Adjust **Minimum sharpness** using the live meter. A card that is too dim or blurry shows "Not sent: sharpness…" under the status. |

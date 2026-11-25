@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const MIN_WORKER_VERSION = 2;
 
 // The first version of the prompt. Phones that saved it get the new one automatically.
@@ -66,7 +66,7 @@ const DEFAULTS = {
   timeoutSec: 8, stallLine: 'Great question. Give me just a second with that one.',
   lateAnswer: true, lateSec: 15, retryNone: 1,
   voiceURI: '', rate: 1.0, toneVol: 0.3, speakQuestion: false, thinkTicks: true,
-  btnSingle: 'toggle', btnDouble: 'capture', btnTriple: 'repeat', autoArm: false, keyboard: true,
+  btnSingle: 'toggle', btnDouble: 'capture', btnTriple: 'repeat', autoArm: false, keyboard: true, gamepad: true, binds: {}, sayReady: true,
   camId: '', res: '1920x1440', camFps: 15, zoom: null, torch: false,
   useCrop: true, crop: { x: 0.1, y: 0.15, w: 0.8, h: 0.7 },
   motionThresh: 4, sharpMin: 60, changeThresh: 10, cooldownSec: 4,
@@ -92,7 +92,7 @@ function loadSettings() {
     saved.v = SETTINGS_VER;
     try { localStorage.setItem(LS_KEY, JSON.stringify(saved)); } catch {}
   }
-  return { ...DEFAULTS, ...saved, v: SETTINGS_VER, crop: { ...DEFAULTS.crop, ...(saved.crop || {}) } };
+  return { ...DEFAULTS, ...saved, v: SETTINGS_VER, crop: { ...DEFAULTS.crop, ...(saved.crop || {}) }, binds: { ...(saved.binds || {}) } };
 }
 function saveSettings() { try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch {} }
 
@@ -194,24 +194,55 @@ function tone(name) {
 }
 
 // ---------------------------------------------------------------- speech
-let speaking = false, speechChain = Promise.resolve();
+let speaking = false, speechChain = Promise.resolve(), speechNote = '';
+const liveUtterances = new Set(); // keep references: Safari can drop an utterance that gets garbage-collected mid-speech
 function speak(text) {
   text = String(text || '').replace(/[*_#`>]/g, '').trim();
   if (!text) return Promise.resolve();
   speechChain = speechChain.then(() => new Promise((resolve) => {
-    const u = new SpeechSynthesisUtterance(text);
-    const v = speechSynthesis.getVoices().find((x) => x.voiceURI === S.voiceURI);
-    if (v) { u.voice = v; u.lang = v.lang; }
-    u.rate = S.rate || 1;
-    let done = false;
-    const finish = () => { if (done) return; done = true; speaking = false; clearTimeout(guard); setSub(); resolve(); };
-    // iOS sometimes never fires "end"; don't let that freeze the app
-    const guard = setTimeout(() => { speechSynthesis.cancel(); finish(); }, 4000 + text.length * 120 / (S.rate || 1));
-    u.onend = finish; u.onerror = finish;
-    speaking = true; setSub();
-    speechSynthesis.speak(u);
+    let done = false, started = false, tries = 0, cur = null, kick = null;
+    const total = setTimeout(() => finish(), 7000 + text.length * 120 / (S.rate || 1));
+    const finish = () => { if (done) return; done = true; speaking = false; clearTimeout(total); clearTimeout(kick); setSub(); resolve(); };
+    const say = () => {
+      tries++;
+      const u = cur = new SpeechSynthesisUtterance(text);
+      liveUtterances.add(u);
+      const v = speechSynthesis.getVoices().find((x) => x.voiceURI === S.voiceURI);
+      if (v) u.voice = v;
+      u.lang = (v && v.lang) || 'en-US';
+      u.rate = S.rate || 1; u.volume = 1;
+      u.onstart = () => { if (cur !== u) return; started = true; speechNote = ''; clearTimeout(kick); };
+      const end = () => { liveUtterances.delete(u); if (cur === u) finish(); };
+      u.onend = end; u.onerror = end;
+      try { if (speechSynthesis.paused) speechSynthesis.resume(); speechSynthesis.speak(u); } catch { finish(); return; }
+      // iOS sometimes swallows speech without any error. If nothing starts, reset it and try once more.
+      kick = setTimeout(() => {
+        if (started || done) return;
+        if (tries < 2) { try { speechSynthesis.cancel(); } catch {} cur = null; setTimeout(say, 200); }
+        else { speechNote = 'Speech is not starting — check the ringer switch and volume, then tap Test voice'; setSub(); }
+      }, 2000);
+    };
+    speaking = true; setSub(); say();
   }));
   return speechChain;
+}
+// Must run inside a tap or key press: it "unlocks" speech and sound on iOS.
+function unlockSpeech() {
+  try {
+    const u = new SpeechSynthesisUtterance('Ready');
+    const v = speechSynthesis.getVoices().find((x) => x.voiceURI === S.voiceURI);
+    if (v) u.voice = v;
+    u.lang = (v && v.lang) || 'en-US'; u.volume = S.sayReady ? 1 : 0;
+    liveUtterances.add(u); u.onend = u.onerror = () => liveUtterances.delete(u);
+    speechSynthesis.speak(u);
+  } catch {}
+  setAudioSession();
+}
+function setAudioSession() { // lets sound and speech play even with the ringer switch on silent (iOS 16.4+)
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch {}
+}
+function updateSpeechInfo() {
+  $('speechInfo').textContent = 'Voices on this phone: ' + speechSynthesis.getVoices().length + (speechNote ? '\n⚠ ' + speechNote : '');
 }
 function loadVoices() {
   const sel = $('voiceSel'), vs = speechSynthesis.getVoices();
@@ -302,15 +333,15 @@ function freshVideoElement() {
   return v;
 }
 
-async function startCamera() {
+async function startCamera(opts = {}) {
   if (camBusy) throw new Error('camera is busy');
   camBusy = true;
-  try { await openCamera(); } finally { camBusy = false; }
+  try { await openCamera(opts); } finally { camBusy = false; }
 }
-async function openCamera() {
+async function openCamera(opts = {}) {
   if (stream) stream.getTracks().forEach((t) => t.stop());
   stream = null; track = null;
-  await sleep(200); // give iOS a moment to release the camera
+  if (!opts.fast) await sleep(200); // give iOS a moment to release the camera (skipped inside a tap, which must be quick)
   let v;
   if (safeMode) v = { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } };
   else {
@@ -321,7 +352,7 @@ async function openCamera() {
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: v });
   } catch (e) {
-    if (S.camId && !safeMode) { S.camId = ''; saveSettings(); return openCamera(); } // saved camera gone: fall back
+    if (S.camId && !safeMode && e.name !== 'NotAllowedError') { S.camId = ''; saveSettings(); return openCamera(opts); } // saved camera gone: fall back
     throw e;
   }
   const t = track = stream.getVideoTracks()[0];
@@ -341,31 +372,58 @@ async function openCamera() {
   $('camInfo').textContent = (t.label || 'Camera') + ' · ' + vid.videoWidth + '×' + vid.videoHeight + (safeMode ? ' · safe mode' : '');
 }
 
-// Tries again if the camera froze, went black, was stopped, or iOS muted it.
-// After a quick second failure it falls back to a plain 720p picture.
+// Tries again if the camera froze, went black, was stopped, or iOS blocked it after you left the app.
+// iOS often refuses to give the camera back until you touch the page again, so when it refuses we show a
+// "tap to reconnect" panel (any tap or key press then reconnects inside that gesture) and keep retrying quietly.
+let camLost = false, autoRetries = 0, retryTimer = null;
 async function restartCamera(reason) {
   if (restarting || camBusy || !running) return;
   if (reason === 'picture black' && Date.now() - lastRestartAt < 20000) return;
-  restarting = true;
-  const quick = reason !== 'manual' && Date.now() - lastRestartAt < 30000;
+  restarting = true; clearTimeout(retryTimer);
+  const gesture = /^(manual|tap|key)/.test(reason);
+  // only a frozen/black/stopped camera that keeps failing falls back to 720p; coming back to the app never does
+  const quick = !gesture && !/^(returned|page restored|auto)/.test(reason) && Date.now() - lastRestartAt < 30000;
   lastRestartAt = Date.now(); camRestarts++;
   camNote = 'Restarting camera (' + reason + ')…'; setSub();
   logCapture({ t: Date.now(), trigger: 'watchdog', status: 'camera', reply: 'Camera restarted: ' + reason, error: '', latencyMs: 0 });
-  for (const safe of (quick ? [true] : [false, false, true])) {
-    safeMode = safe;
+  let lastErr = null;
+  const plan = quick ? [true] : [false, false, true];
+  for (let i = 0; i < plan.length; i++) {
+    safeMode = plan[i];
     try {
-      await startCamera();
-      camNote = safe ? 'Camera in safe mode (720p)' : '';
+      await startCamera({ fast: gesture && i === 0 });
+      camNote = safeMode ? 'Camera in safe mode (720p)' : '';
+      camLost = false; autoRetries = 0; showCamLost(false);
       prevGrey = null; stillCount = 0; restarting = false; lastRestartAt = Date.now(); setSub();
       return;
-    } catch (e) { camNote = 'Camera error: ' + e.message; setSub(); await sleep(1500); }
+    } catch (e) {
+      lastErr = e; camNote = 'Camera error: ' + (e.message || e.name); setSub();
+      if (e && (e.name === 'NotAllowedError' || e.name === 'SecurityError')) break; // a lower resolution cannot fix a permission block
+      await sleep(1200);
+    }
   }
-  restarting = false; camNote = 'Camera failed — tap the Camera ↻ button'; setSub(); tone('failed');
+  safeMode = false; restarting = false; camLost = true;
+  logCapture({ t: Date.now(), trigger: 'watchdog', status: 'camera', reply: 'Camera could not reconnect: ' + (lastErr ? lastErr.name + ' — ' + lastErr.message : ''), error: '', latencyMs: 0 });
+  showCamLost(true, lastErr);
+  if (autoRetries < 5) { // quiet background retries with longer gaps
+    const d = [3000, 6000, 12000, 20000, 30000][autoRetries++];
+    retryTimer = setTimeout(() => { if (camLost && !document.hidden) restartCamera('auto retry'); }, d);
+  }
 }
+function showCamLost(on, err) {
+  $('camLost').hidden = !on;
+  if (!on) return;
+  $('camLostWhy').textContent = (err && err.name === 'NotAllowedError')
+    ? 'iOS blocked the camera after you left the app.' : 'The camera did not come back.';
+  camNote = 'Camera disconnected — tap the orange panel or press any key'; setSub();
+}
+function gestureReconnect() { if (camLost && running && !restarting && !camBusy) restartCamera('tap'); }
+document.addEventListener('click', gestureReconnect, true);
+document.addEventListener('keydown', () => { if (camLost && running && !restarting && !camBusy) restartCamera('key'); }, true);
 
 // Watchdog: runs on its own timer, separate from the capture loop.
 setInterval(() => {
-  if (!running || restarting || camBusy || document.hidden) return;
+  if (!running || restarting || camBusy || camLost || document.hidden) return;
   const now = performance.now();
   if (video.paused && video.srcObject) video.play().catch(() => {});
   if (video.currentTime !== lastCT) { lastCT = video.currentTime; lastCTAt = now; }
@@ -715,6 +773,7 @@ function setSub() {
   if (skipNote && Date.now() - skipNoteAt < 8000) bits.push(skipNote);
   if (needChange && armed && phase === 'watch') bits.push('waiting for card to change');
   if (speaking) bits.push('speaking');
+  if (speechNote) bits.push('⚠ ' + speechNote);
   $('sub').textContent = bits.join(' · ');
 }
 function updateMeters(still) {
@@ -731,19 +790,37 @@ function updateMeters(still) {
   $('mFps').textContent = fpsShown ? fpsShown.toFixed(1) : '–';
   renderState(); setSub();
 }
+let lastFull = null, readerPx = 28;
 function showLast(e) {
-  $('lastQ').textContent = last.q ? 'Card: ' + last.q : '';
-  $('lastA').textContent = (e.status === 'answer' || e.status === 'late-answer') ? last.a : '(' + e.status + ') ' + (e.error || e.reply || '');
-  $('lastInfo').textContent = new Date(e.t).toLocaleTimeString() + ' · ' + (e.latencyMs / 1000).toFixed(1) + ' s · sharp ' + e.sharp +
+  const isAns = e.status === 'answer' || e.status === 'late-answer';
+  const info = new Date(e.t).toLocaleTimeString() + ' · ' + (e.latencyMs / 1000).toFixed(1) + ' s · sharp ' + e.sharp +
     ' · ' + e.kb + ' KB · ' + (e.model || '');
+  $('lastQ').textContent = last.q ? 'Card: ' + last.q : '';
+  $('lastA').textContent = isAns ? last.a : '(' + e.status + ') ' + (e.error || e.reply || '');
+  $('lastInfo').textContent = info;
+  lastFull = { card: last.q, answer: isAns ? last.a : '', raw: e.reply || e.error || '', status: e.status, info };
+  if (!$('reader').hidden) renderReader();
 }
+function renderReader() {
+  const f = lastFull || { card: '', answer: '', raw: '', info: '', status: '' };
+  $('rCard').textContent = f.card ? 'Card: ' + f.card : '';
+  $('rAnswer').textContent = f.answer || '(' + (f.status || 'nothing yet') + ')';
+  $('rAnswer').style.fontSize = readerPx + 'px';
+  $('rRaw').textContent = f.raw || '';
+  $('rInfo').textContent = f.info || '';
+}
+function openReader() { renderReader(); $('reader').hidden = false; }
+function closeReader() { $('reader').hidden = true; }
+$('btnReader').onclick = openReader; $('lastA').onclick = openReader; $('rClose').onclick = closeReader;
+$('rBig').onclick = () => { readerPx = Math.min(64, readerPx + 4); renderReader(); };
+$('rSmall').onclick = () => { readerPx = Math.max(14, readerPx - 4); renderReader(); };
 
 // ---------------------------------------------------------------- buttons
 $('btnStart').onclick = async () => {
   if (running) return;
   $('btnStart').disabled = true; $('sub').textContent = 'Starting camera…';
   // These must happen inside a tap on iOS to unlock sound and speech:
-  audioCtx(); speechSynthesis.speak(new SpeechSynthesisUtterance(' '));
+  audioCtx(); unlockSpeech();
   setupMediaSession();
   try { await startCamera(); }
   catch (e) {
@@ -777,7 +854,10 @@ $('btnShow').onclick = () => setShowMode(true);
   });
 })();
 $('btnCam').onclick = () => restartCamera('manual');
-$('btnTestVoice').onclick = () => { audioCtx(); speak('This is how answers will sound in your earbud.'); };
+$('btnTestVoice').onclick = () => {
+  audioCtx(); setAudioSession(); speechNote = '';
+  speak('This is how answers will sound in your earbud.').then(updateSpeechInfo); updateSpeechInfo();
+};
 $('btnPromptReset').onclick = () => { S.prompt = DEFAULT_PROMPT; saveSettings(); document.querySelector('[data-k=prompt]').value = S.prompt; syncPreset(); };
 $('btnResetAll').onclick = () => {
   if (!confirm('Reset every setting (including Worker URL and token)?')) return;
@@ -814,12 +894,19 @@ function keyAction(k) {
   if (k === 'r') return repeatLast;
   if (k === 's') return () => setShowMode(!document.body.classList.contains('showmode'));
   if (k === 'k') return () => restartCamera('manual');
-  if (k === 'Escape') return () => setShowMode(false);
+  if (k === 'Escape') return () => { if (!$('reader').hidden) closeReader(); else setShowMode(false); };
   return null;
 }
 function typingInField(e) { return e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName); }
 document.addEventListener('keydown', (e) => {
+  if (learning && !e.repeat && !/^(Shift|Control|Alt|Meta)/.test(e.key)) {
+    e.preventDefault();
+    if (e.key === 'Escape') { stopLearning(); $('learnMsg').textContent = 'Cancelled.'; } else learned('k:' + e.code);
+    return;
+  }
   if (!S.keyboard || e.ctrlKey || e.metaKey || e.altKey || typingInField(e)) return;
+  const bound = boundAction('k:' + e.code);
+  if (bound) { e.preventDefault(); if (!e.repeat) runBound(bound); return; }
   const act = keyAction(e.key.length === 1 ? e.key.toLowerCase() : e.key);
   if (!act) return;
   e.preventDefault(); // stops Space from scrolling the page or clicking a focused button
@@ -830,12 +917,83 @@ document.addEventListener('keyup', (e) => {
   e.preventDefault(); // some browsers click a focused button on Space *release*
 });
 
+// ---------------------------------------------------------------- learn your own buttons (8BitDo etc.)
+// A controller can show up two ways: as a KEYBOARD (its buttons send keys) or as a GAMEPAD (Safari's gamepad
+// support). Both work the same: tap Learn, press the button, and it is remembered.
+const BIND_ACTIONS = [['toggle', 'Arm / disarm'], ['capture', 'Capture now'], ['repeat', 'Repeat last answer'],
+                      ['show', 'Show mode on / off'], ['camera', 'Restart camera']];
+const PAD_DEFAULTS = { 'g:b0': 'toggle', 'g:b1': 'capture', 'g:b3': 'repeat' }; // standard layout: A, B, Y
+let learning = null, learnTimer = null, padPrev = null, padName = '';
+function bindLabel(b) {
+  if (b.startsWith('k:')) return 'Key ' + b.slice(2);
+  let m = b.match(/^g:b(\d+)$/); if (m) return 'Controller button ' + m[1];
+  m = b.match(/^g:a(\d+)([+-])$/); return m ? 'Controller stick/pad ' + m[1] + m[2] : b;
+}
+function boundAction(b) { for (const [k] of BIND_ACTIONS) if ((S.binds[k] || []).includes(b)) return k; return null; }
+function runBound(action) {
+  if (!running) { if (action === 'toggle') $('btnStart').click(); return; }
+  if (action === 'toggle') setArmed(!armed);
+  else if (action === 'capture') forceCapture('bound');
+  else if (action === 'repeat') repeatLast();
+  else if (action === 'show') setShowMode(!document.body.classList.contains('showmode'));
+  else if (action === 'camera') restartCamera('manual');
+}
+function buildBindUI() {
+  const box = $('bindList'); box.innerHTML = '';
+  for (const [k, label] of BIND_ACTIONS) {
+    const row = document.createElement('div'); row.className = 'bindrow';
+    const lab = document.createElement('b'); lab.textContent = label;
+    const cur = document.createElement('span'); cur.className = 'hint';
+    cur.textContent = (S.binds[k] || []).map(bindLabel).join(', ') || 'not set';
+    const learn = document.createElement('button'); learn.textContent = 'Learn';
+    learn.onclick = () => startLearning(k);
+    const clr = document.createElement('button'); clr.textContent = 'Clear';
+    clr.onclick = () => { S.binds[k] = []; saveSettings(); buildBindUI(); };
+    row.append(lab, cur, learn, clr); box.appendChild(row);
+  }
+}
+function startLearning(act) {
+  learning = act; padPrev = null; clearTimeout(learnTimer);
+  $('learnMsg').textContent = 'Now press a key or a controller button… (15 seconds)';
+  learnTimer = setTimeout(() => { if (learning) { stopLearning(); $('learnMsg').textContent = 'Nothing pressed — cancelled.'; } }, 15000);
+}
+function stopLearning() { learning = null; clearTimeout(learnTimer); }
+function learned(b) {
+  const act = learning; stopLearning();
+  for (const [k] of BIND_ACTIONS) S.binds[k] = (S.binds[k] || []).filter((x) => x !== b); // one button, one job
+  S.binds[act] = [...(S.binds[act] || []), b]; saveSettings(); buildBindUI();
+  $('learnMsg').textContent = 'Saved: ' + bindLabel(b) + ' → ' + BIND_ACTIONS.find((x) => x[0] === act)[1];
+}
+function padPoll() {
+  if (document.hidden || !navigator.getGamepads || (!S.gamepad && !learning)) return;
+  const now = {}; let name = '';
+  for (const gp of navigator.getGamepads()) {
+    if (!gp) continue;
+    name = gp.id;
+    gp.buttons.forEach((b, i) => { if (b.pressed) now['g:b' + i] = 1; });
+    gp.axes.forEach((v, i) => { if (v > 0.7 && v <= 1.01) now['g:a' + i + '+'] = 1; else if (v < -0.7 && v >= -1.01) now['g:a' + i + '-'] = 1; });
+  }
+  if (name !== padName) { // a controller appeared or left: start from a clean baseline so held/resting inputs don't fire
+    padName = name; padPrev = null;
+    $('padInfo').textContent = name ? 'Controller seen: ' + name : 'No controller seen yet — press a button on it.';
+  }
+  if (padPrev) for (const k in now) if (!padPrev[k]) padPress(k);
+  padPrev = now;
+}
+function padPress(k) {
+  if (learning) { learned(k); return; }
+  if (!S.gamepad || !running) return; // a controller can't START the app: iOS needs a real tap or key for that
+  const a = boundAction(k) || PAD_DEFAULTS[k]; if (a) runBound(a);
+}
+setInterval(padPoll, 60);
+
 // ---------------------------------------------------------------- lifecycle
 document.addEventListener('visibilitychange', async () => {
   if (document.hidden || !running) return;
   if (!wakeLock) requestWakeLock();
   if (keepAlive) keepAlive.play().catch(() => {});
-  restartCamera('returned to app'); // iOS usually freezes the camera while the app is away
+  setAudioSession();
+  setTimeout(() => restartCamera('returned to app'), 600); // iOS usually freezes the camera while the app is away
 });
 window.addEventListener('pageshow', (e) => { if (e.persisted && running) restartCamera('page restored'); });
 
@@ -873,6 +1031,9 @@ $('speedPreset').addEventListener('change', () => {
 
 function init() {
   buildCueSettings();
+  buildBindUI();
+  updateSpeechInfo();
+  speechSynthesis.addEventListener && speechSynthesis.addEventListener('voiceschanged', updateSpeechInfo);
   bindSettings();
   syncPreset();
   drawCropBox();
