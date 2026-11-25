@@ -116,6 +116,14 @@ Works too (a page-turner just sends ordinary keys). **Space / Enter** = single e
 **→ / Page Down** = double, **← / Page Up** = triple. **A** arm/disarm, **C** capture,
 **R** repeat, **S** show mode, **K** restart camera, **Esc** leave show mode.
 
+### What it does with the card
+
+**Gemini → What should it do with the card?** The default, **Anything**, responds to whatever
+is on the card: a question gets answered, a word, name or topic gets a short interesting or funny
+line, an instruction gets carried out. **Questions only** is the stricter answer-the-printed-question
+mode. Use **Style** to steer the tone, e.g. *be witty*, *keep it under 15 words*, *sound confident*.
+You can still edit the full prompt yourself.
+
 ### Reading speed
 
 **Detection → Capture speed**: *Fastest* sends the first sharp frame as soon as the picture is

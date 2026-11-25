@@ -175,7 +175,15 @@
       </select></div>
   </div>
   <div class="hint">If a model rejects these, the Worker quietly retries without them.</div>
-  <label>Prompt</label>
+  <label>What should it do with the card?</label>
+  <select id="promptPreset">
+    <option value="anything">Anything — respond to whatever is on the card (default)</option>
+    <option value="question">Questions only — answer the printed question</option>
+    <option value="custom">Custom (my own prompt below)</option>
+  </select>
+  <label>Style (optional) — added to every request</label>
+  <input type="text" data-k="style" placeholder="e.g. be witty · keep it under 15 words · sound confident" autocapitalize="off">
+  <label>Full prompt (advanced)</label>
   <textarea data-k="prompt" style="min-height:150px"></textarea>
   <button id="btnPromptReset">Reset prompt</button>
   <div class="row">

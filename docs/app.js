@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const MIN_WORKER_VERSION = 2;
 
 // The first version of the prompt. Phones that saved it get the new one automatically.
@@ -26,7 +26,7 @@ const OLD_PROMPT_V1 =
   'A: <a short spoken answer, one or two plain sentences, no lists, symbols or markdown>\n' +
   'If you cannot read the question with confidence, reply with just: NONE';
 
-const DEFAULT_PROMPT =
+const PROMPT_QUESTION =
   'The photo shows a paper card with a printed question. A stage performer will hear your answer through an earbud.\n' +
   'Find the question. If more than one question is visible, use the first one, nearest the top.\n' +
   'Reply in exactly this format and nothing else:\n' +
@@ -34,6 +34,20 @@ const DEFAULT_PROMPT =
   'A: <the answer: one or two short sentences to be spoken aloud, plain words only, no lists, symbols or markdown>\n' +
   'Always give your best answer, even if the print is small or slightly unclear. ' +
   'Reply with just the word NONE only if no question can be read at all.';
+
+// General-purpose: respond to whatever is on the card, not just questions.
+const PROMPT_ANYTHING =
+  "The photo shows a card held up during a live show. Your reply is spoken into the performer's earbud, so it must be quick and natural.\n" +
+  'Whatever is on the card — a question, a word, a name, a topic, a statement, a number, a prompt or an instruction — respond to it directly ' +
+  'and helpfully, like a quick-witted friend. If it asks something, answer it. If it is a topic, name or word, say something short, ' +
+  'interesting or funny about it. If it is an instruction, carry it out. If several things are written, deal with the first one, nearest the top.\n' +
+  'Reply in exactly this format and nothing else:\n' +
+  'Q: <what the card says, in at most 12 words>\n' +
+  'A: <your reply to be spoken aloud: one to three short sentences, plain words only, no lists, symbols or markdown>\n' +
+  'Always give your best reply, even if the print is small or slightly unclear. ' +
+  'Reply with just the word NONE only if nothing on the card can be read at all.';
+const DEFAULT_PROMPT = PROMPT_ANYTHING;
+const PROMPTS = { anything: PROMPT_ANYTHING, question: PROMPT_QUESTION };
 
 // How quickly a card is read once it is placed. "Still checks" must pass, then the sharpest of N frames is sent.
 const PRESETS = {
@@ -47,7 +61,7 @@ const DEFAULTS = {
   workerUrl: '', token: '',
   models: 'gemini-3.5-flash, gemini-flash-latest',
   mediaResolution: 'MEDIA_RESOLUTION_HIGH', thinking: 'minimal', maxTokens: 1024,
-  prompt: DEFAULT_PROMPT,
+  prompt: DEFAULT_PROMPT, style: '',
   maxSide: 2048, jpegQuality: 85,
   timeoutSec: 8, stallLine: 'Great question. Give me just a second with that one.',
   lateAnswer: true, lateSec: 15, retryNone: 1,
@@ -62,17 +76,19 @@ for (const k of CUE_KEYS) DEFAULTS['cue_' + k] = 'tone';
 
 // ---------------------------------------------------------------- settings
 const LS_KEY = 'cardAssistant.settings.v1';
-const SETTINGS_VER = 2;
+const SETTINGS_VER = 3;
 let S = loadSettings();
 function loadSettings() {
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem(LS_KEY) || '{}'); } catch {}
   if ((saved.v || 1) < SETTINGS_VER) {
-    // Version 1 saved every default as if you had chosen it. Drop anything still equal to the OLD
+    // Older versions saved every default as if you had chosen it. Drop anything still equal to an OLD
     // default so the improved defaults apply. Values you really changed are kept.
-    const old = { thinking: '', res: 'max', stillFrames: 3, windowFrames: 4, watchFps: 3, activeFps: 8 };
-    for (const k in old) if (saved[k] === old[k]) delete saved[k];
-    if (saved.prompt === OLD_PROMPT_V1) delete saved.prompt;
+    if ((saved.v || 1) < 2) {
+      const old = { thinking: '', res: 'max', stillFrames: 3, windowFrames: 4, watchFps: 3, activeFps: 8 };
+      for (const k in old) if (saved[k] === old[k]) delete saved[k];
+    }
+    if (saved.prompt === OLD_PROMPT_V1 || saved.prompt === PROMPT_QUESTION) delete saved.prompt;
     saved.v = SETTINGS_VER;
     try { localStorage.setItem(LS_KEY, JSON.stringify(saved)); } catch {}
   }
@@ -659,7 +675,7 @@ async function callWorker(dataUrl, timeoutMs) {
     const r = await fetch(S.workerUrl.trim().replace(/\/$/, ''), {
       method: 'POST', signal: ctrl.signal,
       headers: { 'Content-Type': 'application/json', 'X-App-Token': S.token.trim() },
-      body: JSON.stringify({ image: dataUrl, prompt: S.prompt, models, generationConfig, timeoutMs }),
+      body: JSON.stringify({ image: dataUrl, prompt: S.prompt + (S.style && S.style.trim() ? '\n\nExtra instructions from the performer: ' + S.style.trim() : ''), models, generationConfig, timeoutMs }),
     });
     const j = await r.json().catch(() => ({ error: 'Bad reply from Worker (HTTP ' + r.status + ')' }));
     return { ...j, ok: r.ok && !j.error };
@@ -716,7 +732,7 @@ function updateMeters(still) {
   renderState(); setSub();
 }
 function showLast(e) {
-  $('lastQ').textContent = last.q ? 'Q: ' + last.q : '';
+  $('lastQ').textContent = last.q ? 'Card: ' + last.q : '';
   $('lastA').textContent = (e.status === 'answer' || e.status === 'late-answer') ? last.a : '(' + e.status + ') ' + (e.error || e.reply || '');
   $('lastInfo').textContent = new Date(e.t).toLocaleTimeString() + ' · ' + (e.latencyMs / 1000).toFixed(1) + ' s · sharp ' + e.sharp +
     ' · ' + e.kb + ' KB · ' + (e.model || '');
@@ -762,7 +778,7 @@ $('btnShow').onclick = () => setShowMode(true);
 })();
 $('btnCam').onclick = () => restartCamera('manual');
 $('btnTestVoice').onclick = () => { audioCtx(); speak('This is how answers will sound in your earbud.'); };
-$('btnPromptReset').onclick = () => { S.prompt = DEFAULT_PROMPT; saveSettings(); document.querySelector('[data-k=prompt]').value = S.prompt; };
+$('btnPromptReset').onclick = () => { S.prompt = DEFAULT_PROMPT; saveSettings(); document.querySelector('[data-k=prompt]').value = S.prompt; syncPreset(); };
 $('btnResetAll').onclick = () => {
   if (!confirm('Reset every setting (including Worker URL and token)?')) return;
   try { localStorage.removeItem(LS_KEY); } catch {}
@@ -839,10 +855,16 @@ function buildCueSettings() {
     "Vibration isn't available on this phone: iPhone Safari doesn't let web pages vibrate it. You can still turn any cue Off, or lower the tone volume.";
 }
 function syncPreset() {
+  const ps = $('promptPreset');
+  if (ps) ps.value = Object.keys(PROMPTS).find((n) => PROMPTS[n] === S.prompt) || 'custom';
   const sel = $('speedPreset'); if (!sel) return;
   const m = Object.keys(PRESETS).find((n) => Object.keys(PRESETS[n]).every((k) => +S[k] === PRESETS[n][k]));
   sel.value = m || 'custom';
 }
+$('promptPreset').addEventListener('change', () => {
+  const t = PROMPTS[$('promptPreset').value]; if (!t) return;
+  S.prompt = t; saveSettings(); document.querySelector('[data-k=prompt]').value = t;
+});
 $('speedPreset').addEventListener('change', () => {
   const p = PRESETS[$('speedPreset').value]; if (!p) return;
   for (const k in p) { S[k] = p[k]; const el = document.querySelector('[data-k=' + k + ']'); if (el) el.value = p[k]; }
