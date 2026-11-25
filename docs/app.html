@@ -243,25 +243,23 @@
 <details>
   <summary>Speech &amp; sounds</summary>
   <div class="acbox">
-    <button id="btnAudioCheck" class="pri">🔊 Run audio check (about 25 s)</button>
-    <div class="hint">Plays a beep and four numbered voices, using different methods. Wear your earbuds, then tick the ones you heard and tap “Use what I heard”.</div>
+    <button id="btnAudioCheck" class="pri">🔊 Run audio check (about 15 s)</button>
+    <div class="hint">Plays a beep, the Gemini voice and the iPhone voice, numbered 1–3. Wear your earbuds, then tick the ones you heard and tap “Use what I heard”.</div>
     <div id="acBanner" class="acbanner"></div>
     <pre id="acOut" class="mono hint"></pre>
     <div id="acHeard" hidden>
       <b>Which did you hear?</b>
       <label class="chk"><input type="checkbox" id="acH1"> 1 — beep</label>
-      <label class="chk"><input type="checkbox" id="acH2"> 2 — iPhone voice</label>
-      <label class="chk"><input type="checkbox" id="acH3"> 3 — iPhone voice, background sound paused</label>
-      <label class="chk"><input type="checkbox" id="acH4"> 4 — iPhone voice, normal audio mode</label>
-      <label class="chk"><input type="checkbox" id="acH5"> 5 — Gemini voice</label>
+      <label class="chk"><input type="checkbox" id="acH2"> 2 — Gemini voice</label>
+      <label class="chk"><input type="checkbox" id="acH3"> 3 — iPhone voice</label>
       <button id="acApply" class="pri">Use what I heard</button><button id="acCopy">Copy report</button>
       <div id="acMsg" class="hint"></div>
     </div>
   </div>
   <label>Voice engine</label>
   <select data-k="voiceEngine">
-    <option value="device">iPhone voice (instant)</option>
-    <option value="gemini">Gemini voice (works if the iPhone voice is silent; ~1–2 s slower to start)</option>
+    <option value="gemini">Gemini voice — streamed, plays through the same route as the beeps (default)</option>
+    <option value="device">iPhone voice (silent on some phones while the camera is on)</option>
   </select>
   <div class="row">
     <div><label>Gemini voice</label><select data-k="ttsVoice">

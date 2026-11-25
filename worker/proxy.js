@@ -23,20 +23,22 @@
  *     Tries each model in turn if one is busy or fails. If a model rejects the
  *     optional settings ("invalid argument"), it retries with basic settings.
  *     returns { text, model, finishReason, geminiMs, usage, attempts }
- *   POST / with { tts: "words to say", voice?: "Kore", model?: "..." }
+ *   POST / with { tts: "words to say", voice?: "Kore", model?: "...", stream?: true }
+ *     stream: true -> raw 16-bit PCM (audio/L16) sent piece by piece as Gemini makes it,
+ *     so the phone can start playing almost at once. Falls back to a whole WAV file.
  *     -> an audio/wav file of Gemini reading the words (the app plays it like music,
  *        which works even when the iPhone's silent switch is on).
  *   GEMINI_TTS_MODEL (Text, optional) default voice model, e.g. gemini-2.5-flash-preview-tts
  */
 
-const WORKER_VERSION = 3;
+const WORKER_VERSION = 4;
 const DEFAULT_MODEL = 'gemini-flash-latest';
 const DEFAULT_TTS_MODEL = 'gemini-2.5-flash-preview-tts';
 const MAX_BODY_BYTES = 15 * 1024 * 1024; // ~15 MB of JSON (base64 photo)
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/';
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const origin = request.headers.get('Origin') || '';
     const allowed = (env.ALLOWED_ORIGIN || '')
       .split(',').map((s) => s.trim().replace(/\/$/, '')).filter(Boolean);
@@ -47,6 +49,7 @@ export default {
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, X-App-Token',
       'Access-Control-Max-Age': '86400',
+      'Access-Control-Expose-Headers': 'X-Tts-Mode, X-Gemini-Ms',
       'Vary': 'Origin',
     };
     const json = (obj, status = 200) =>
@@ -90,7 +93,7 @@ export default {
       return json({ error: 'Body must be JSON' }, 400);
     }
 
-    if (typeof body.tts === 'string') return handleTts(env, body, cors, json);
+    if (typeof body.tts === 'string') return handleTts(env, body, cors, json, ctx);
 
     let image = String(body.image || '');
     let mimeType = String(body.mimeType || 'image/jpeg');
@@ -153,7 +156,7 @@ export default {
 };
 
 // Text -> speech with Gemini, returned as a WAV file.
-async function handleTts(env, body, cors, json) {
+async function handleTts(env, body, cors, json, ctx) {
   const text = String(body.tts).trim().slice(0, 3000);
   if (!text) return json({ error: 'No text to speak' }, 400);
   const model = String(body.model || env.GEMINI_TTS_MODEL || DEFAULT_TTS_MODEL);
@@ -163,6 +166,10 @@ async function handleTts(env, body, cors, json) {
     contents: [{ role: 'user', parts: [{ text }] }],
     generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } } },
   };
+  if (body.stream) {
+    const streamed = await ttsStream(env, model, payload, cors, ctx);
+    if (streamed) return streamed; // otherwise fall through to a whole file
+  }
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 25000);
   const t0 = Date.now();
@@ -186,7 +193,61 @@ async function handleTts(env, body, cors, json) {
   const bytes = b64ToBytes(inl.data);
   const rate = +((/rate=(\d+)/.exec(mime) || [])[1] || 24000);
   const wav = /wav/i.test(mime) ? bytes : pcmToWav(bytes, rate);
-  return new Response(wav, { headers: { ...cors, 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store', 'X-Gemini-Ms': String(Date.now() - t0) } });
+  return new Response(wav, { headers: { ...cors, 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store', 'X-Tts-Mode': 'file', 'X-Gemini-Ms': String(Date.now() - t0) } });
+}
+// Streaming voice: ask Gemini for its "server-sent events" stream and pass each audio piece straight on.
+// Returns null (so the caller makes a whole file instead) if streaming isn't available or gives no audio.
+async function ttsStream(env, model, payload, cors, ctx) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 30000);
+  let res;
+  try {
+    res = await fetch(GEMINI_BASE + encodeURIComponent(model) + ':streamGenerateContent?alt=sse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
+      body: JSON.stringify(payload), signal: ctrl.signal,
+    });
+  } catch { clearTimeout(timer); return null; }
+  if (!res.ok || !res.body) { clearTimeout(timer); try { await res.text(); } catch {} return null; }
+  const reader = res.body.getReader(), dec = new TextDecoder();
+  let buf = '', rate = 24000;
+  const parseEvent = (ev) => {
+    const data = ev.split(/\r?\n/).filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trim()).join('');
+    if (!data) return [];
+    let j; try { j = JSON.parse(data); } catch { return []; }
+    const out = [];
+    for (const c of (j.candidates || [])) for (const p of ((c.content || {}).parts || [])) {
+      const inl = p.inlineData || p.inline_data;
+      if (inl && inl.data) {
+        const m = /rate=(\d+)/.exec(String(inl.mimeType || inl.mime_type || '')); if (m) rate = +m[1];
+        out.push(b64ToBytes(inl.data));
+      }
+    }
+    return out;
+  };
+  const nextAudio = async () => { // the audio pieces from the next event(s); null when the stream ends
+    for (;;) {
+      const m = /\r?\n\r?\n/.exec(buf);
+      if (m) { const ev = buf.slice(0, m.index); buf = buf.slice(m.index + m[0].length); const out = parseEvent(ev); if (out.length) return out; continue; }
+      const { done, value } = await reader.read();
+      if (done) { const out = buf.trim() ? parseEvent(buf) : []; buf = ''; return out.length ? out : null; }
+      buf += dec.decode(value, { stream: true });
+    }
+  };
+  let first = null;
+  try { first = await nextAudio(); } catch {}
+  if (!first) { clearTimeout(timer); try { reader.cancel(); } catch {} return null; }
+  const { readable, writable } = new TransformStream();
+  const w = writable.getWriter();
+  const pump = (async () => {
+    try {
+      for (const b of first) await w.write(b);
+      let more;
+      while ((more = await nextAudio())) for (const b of more) await w.write(b);
+    } catch {} finally { clearTimeout(timer); try { await w.close(); } catch {} }
+  })();
+  if (ctx && ctx.waitUntil) ctx.waitUntil(pump);
+  return new Response(readable, { headers: { ...cors, 'Content-Type': 'audio/L16;rate=' + rate, 'Cache-Control': 'no-store', 'X-Tts-Mode': 'stream' } });
 }
 function b64ToBytes(b64) {
   const bin = atob(b64), out = new Uint8Array(bin.length);

@@ -14,8 +14,8 @@
  */
 'use strict';
 
-const APP_VERSION = '1.7.0';
-const MIN_WORKER_VERSION = 2;
+const APP_VERSION = '1.8.0';
+const MIN_WORKER_VERSION = 4;
 
 // The first version of the prompt. Phones that saved it get the new one automatically.
 const OLD_PROMPT_V1 =
@@ -78,7 +78,7 @@ const DEFAULTS = {
   models: 'gemini-3.5-flash, gemini-flash-latest',
   mediaResolution: 'MEDIA_RESOLUTION_HIGH', thinking: 'minimal', maxTokens: 2048,
   prompt: DEFAULT_PROMPT, style: '', allItems: true,
-  voiceEngine: 'device', ttsVoice: 'Kore', ttsModel: 'gemini-2.5-flash-preview-tts', pauseLoopForSpeech: true, audioSessionMode: 'playback', freezeMode: 'speech',
+  voiceEngine: 'gemini', ttsVoice: 'Kore', ttsModel: 'gemini-2.5-flash-preview-tts', pauseLoopForSpeech: true, audioSessionMode: 'playback', freezeMode: 'speech',
   maxSide: 2048, jpegQuality: 85,
   timeoutSec: 8, stallLine: 'Great question. Give me just a second with that one.',
   lateAnswer: true, lateSec: 15, retryNone: 1,
@@ -93,7 +93,7 @@ for (const k of CUE_KEYS) DEFAULTS['cue_' + k] = 'tone';
 
 // ---------------------------------------------------------------- settings
 const LS_KEY = 'cardAssistant.settings.v1';
-const SETTINGS_VER = 5;
+const SETTINGS_VER = 6;
 let S = loadSettings();
 function loadSettings() {
   let saved = {};
@@ -107,6 +107,7 @@ function loadSettings() {
     }
     if ([OLD_PROMPT_V1, OLD_QUESTION_V2, OLD_ANYTHING_V3].includes(saved.prompt)) delete saved.prompt;
     if ((saved.v || 1) < 4 && saved.maxTokens === 1024) delete saved.maxTokens; // longer pages need room for many answers
+    if ((saved.v || 1) < 6) delete saved.voiceEngine; // the iPhone voice turned out silent while the camera runs: Gemini voice is the default now
     if ((saved.v || 1) < 5) delete saved.pauseLoopForSpeech; // now on by default: the background sound was cutting into speech
     saved.v = SETTINGS_VER;
     try { localStorage.setItem(LS_KEY, JSON.stringify(saved)); } catch {}
@@ -261,17 +262,20 @@ function speak(text) {
   text = cleanSpeech(text);
   if (!text) return Promise.resolve();
   if (S.voiceEngine === 'gemini' && S.workerUrl && !geminiVoiceDown) {
-    const buf = geminiVoiceBuffer(text); // starts generating NOW, while anything earlier is still being spoken
-    buf.catch(() => {});
+    const job = voiceJob(text); // starts making the voice NOW, while anything earlier is still being spoken
     speechChain = speechChain.then(async () => {
-      speaking = true; setSub(); holdLoop();
-      try { const ab = await buf; await wakeAudio(); await playBuffer(ab); voiceFails = 0; if (/Gemini voice/.test(speechNote)) speechNote = ''; }
+      speaking = true; setSub();
+      try { await playJob(job); voiceFails = 0; if (/Gemini voice/.test(speechNote)) speechNote = ''; }
       catch (e) {
-        voiceFails++; if (voiceFails >= 2) geminiVoiceDown = true;
-        sev('Gemini voice failed: ' + e.message);
-        speechNote = 'Gemini voice failed (' + e.message + ') — used the iPhone voice instead';
-        for (const ch of splitSpeech(text)) await speakDeviceNow(ch);
-      } finally { speaking = false; setSub(); releaseLoop(); }
+        sev('Gemini voice failed: ' + e.message + ' — trying a whole file');
+        try { await playJob(voiceJob(text, { stream: false })); voiceFails = 0; }
+        catch (e2) {
+          voiceFails++; if (voiceFails >= 3) geminiVoiceDown = true;
+          sev('Gemini voice failed again: ' + e2.message);
+          speechNote = 'Gemini voice failed (' + e2.message + ')';
+          await tone('failed');
+        }
+      } finally { speaking = false; setSub(); }
     });
     return speechChain;
   }
@@ -344,49 +348,101 @@ function speakDeviceNow(text) {
   });
 }
 
-// Gemini voice: the Worker returns a WAV file; we decode it and play it through Web Audio (same route as the beeps).
-const voiceCache = new Map(); // text -> Promise<AudioBuffer>, so the stall line and repeats are instant
-let voiceFails = 0, geminiVoiceDown = false, lastTtsMs = 0;
-function geminiVoiceBuffer(text) {
+// Gemini voice, streamed. The Worker passes the audio on piece by piece as Gemini makes it; we play each piece
+// the moment it arrives, back to back, through Web Audio (the route the beeps use, which you can hear).
+// Finished voices are kept, so the stall line, "Number 1…" and repeats are instant.
+const voiceJobs = new Map();
+let voiceFails = 0, geminiVoiceDown = false;
+function voiceJob(text, opts = {}) {
   text = cleanSpeech(text);
+  const stream = opts.stream !== false;
   const key = S.ttsVoice + '|' + S.ttsModel + '|' + text;
-  if (voiceCache.has(key)) return voiceCache.get(key);
-  const p = (async () => {
-    const t0 = performance.now(), ctrl = new AbortController(), tm = setTimeout(() => ctrl.abort(), 20000);
+  const have = voiceJobs.get(key);
+  if (have && !have.failed) return have;
+  const job = { text, chunks: [], done: false, failed: null, mode: '', t0: performance.now(), firstMs: 0, totalMs: 0, waiters: [] };
+  const wake = () => { job.waiters.splice(0).forEach((f) => f()); };
+  job.wait = () => new Promise((r) => job.waiters.push(r));
+  voiceJobs.set(key, job);
+  if (voiceJobs.size > 80) voiceJobs.delete(voiceJobs.keys().next().value);
+  (async () => {
+    const ctrl = new AbortController(), tm = setTimeout(() => ctrl.abort(), 25000);
     try {
       const r = await fetch(S.workerUrl.trim().replace(/\/$/, ''), {
         method: 'POST', signal: ctrl.signal,
         headers: { 'Content-Type': 'application/json', 'X-App-Token': S.token.trim() },
-        body: JSON.stringify({ tts: text, voice: S.ttsVoice, model: S.ttsModel }),
+        body: JSON.stringify({ tts: text, voice: S.ttsVoice, model: S.ttsModel, stream }),
       });
       if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || 'HTTP ' + r.status); }
-      if (!/audio/.test(r.headers.get('Content-Type') || '')) throw new Error('Worker is out of date (no voice support) — paste the new proxy.js');
-      const ab = await r.arrayBuffer();
-      if (ab.byteLength < 100) throw new Error('empty audio');
-      const buf = await new Promise((res, rej) => audioCtx().decodeAudioData(ab, res, rej));
-      lastTtsMs = Math.round(performance.now() - t0);
-      return buf;
-    } catch (e) { throw e.name === 'AbortError' ? new Error('timed out') : e; }
-    finally { clearTimeout(tm); }
+      const ct = r.headers.get('Content-Type') || '';
+      if (/L16|pcm/i.test(ct) && r.body && r.body.getReader) {
+        job.mode = 'streamed';
+        const rate = +((/rate=(\d+)/.exec(ct) || [])[1] || 24000);
+        const reader = r.body.getReader();
+        let carry = null;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (value && value.length) {
+            let bytes = value;
+            if (carry) { const m = new Uint8Array(carry.length + bytes.length); m.set(carry); m.set(bytes, carry.length); bytes = m; carry = null; }
+            if (bytes.length % 2) { carry = bytes.slice(bytes.length - 1); bytes = bytes.subarray(0, bytes.length - 1); }
+            if (bytes.length) {
+              const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), n = bytes.length / 2, f = new Float32Array(n);
+              for (let i = 0; i < n; i++) f[i] = dv.getInt16(i * 2, true) / 32768;
+              if (!job.firstMs) job.firstMs = Math.round(performance.now() - job.t0);
+              job.chunks.push({ data: f, rate }); wake();
+            }
+          }
+          if (done) break;
+        }
+      } else if (/audio/i.test(ct)) {
+        job.mode = 'whole file';
+        const ab = await r.arrayBuffer();
+        const buf = await new Promise((res, rej) => audioCtx().decodeAudioData(ab, res, rej));
+        job.firstMs = Math.round(performance.now() - job.t0);
+        job.chunks.push({ data: buf.getChannelData(0), rate: buf.sampleRate }); wake();
+      } else throw new Error('Worker is out of date — paste the new proxy.js into Cloudflare');
+      if (!job.chunks.length) throw new Error('no audio came back');
+    } catch (e) {
+      job.failed = e.name === 'AbortError' ? new Error('timed out') : e;
+      if (voiceJobs.get(key) === job) voiceJobs.delete(key);
+    } finally { clearTimeout(tm); job.totalMs = Math.round(performance.now() - job.t0); job.done = true; wake(); }
   })();
-  voiceCache.set(key, p);
-  p.catch(() => voiceCache.delete(key));
-  if (voiceCache.size > 60) voiceCache.delete(voiceCache.keys().next().value);
-  return p;
+  return job;
 }
-function playBuffer(buf) {
-  return new Promise((resolve) => {
-    const c = audioCtx(), src = c.createBufferSource();
-    src.buffer = buf; src.connect(c.destination);
-    const guard = setTimeout(() => { sev('Gemini clip guard timeout'); resolve(); }, buf.duration * 1000 + 6000);
-    src.onended = () => { clearTimeout(guard); sev('Gemini clip ended'); resolve(); };
-    sev('Gemini clip playing (' + buf.duration.toFixed(1) + ' s)');
-    src.start();
-  });
+// Make sure Web Audio is really running before we play (iOS can leave it suspended or "interrupted").
+async function ensureAudioRunning() {
+  const c = audioCtx();
+  audioQuiet = false;
+  for (let i = 0; i < 4 && c.state !== 'running'; i++) { try { await c.resume(); } catch {} if (c.state !== 'running') await sleep(150); }
+  if (c.state !== 'running') sev('Web Audio would not start (' + c.state + ')');
+  return c;
+}
+// Play a voice as its pieces arrive, gap-free. Resolves after the last piece has played.
+async function playJob(job) {
+  const c = await ensureAudioRunning();
+  let i = 0, t = 0, any = false;
+  for (;;) {
+    while (i < job.chunks.length) {
+      const ch = job.chunks[i++];
+      const b = c.createBuffer(1, ch.data.length, ch.rate);
+      b.getChannelData(0).set(ch.data);
+      const src = c.createBufferSource(); src.buffer = b; src.connect(c.destination);
+      if (!any || t < c.currentTime + 0.01) t = c.currentTime + (any ? 0.01 : 0.05);
+      src.start(t); t += b.duration;
+      if (!any) sev('voice "' + job.text.slice(0, 24) + '" — ' + (job.mode || '?') + ', first sound after ' + job.firstMs + ' ms');
+      any = true;
+    }
+    if (job.done) break;
+    await job.wait();
+  }
+  if (!any) throw job.failed || new Error('no audio');
+  const left = t - c.currentTime;
+  if (left > 0) await sleep(left * 1000 + 60);
 }
 function prewarmVoice() { // make the lines we know in advance, so they play instantly
-  if (S.voiceEngine !== 'gemini' || !S.workerUrl || !actx) return;
-  geminiVoiceBuffer(S.stallLine).catch(() => {});
+  if (S.voiceEngine !== 'gemini' || !S.workerUrl) return;
+  voiceJob(S.stallLine, { stream: false });
+  for (let n = 1; n <= 6; n++) voiceJob('Number ' + n + '.', { stream: false });
 }
 
 // Must run inside a tap or key press: it "unlocks" speech and sound on iOS.
@@ -877,7 +933,7 @@ async function runCapture(c) {
     entry.status = stalled ? 'late-answer' : 'answer'; next = 'speak';
     entry.items = parsed.items.length;
     last = { q: parsed.q, a: parsed.a, items: parsed.items, text: res.text };
-    if (S.voiceEngine === 'gemini') itemTexts(parsed.items).forEach((t) => geminiVoiceBuffer(t).catch(() => {})); // start making the voice now
+    if (S.voiceEngine === 'gemini') itemTexts(parsed.items).forEach((t) => voiceJob(t)); // start making the voice now
   }
   logCapture(entry); // logged BEFORE speaking, so it is saved even if something interrupts the speech
   showLast(entry);
@@ -930,10 +986,12 @@ function displayItems(items) {
   return items.map((it, i) => (i + 1) + '. ' + (it.q ? it.q + '\n→ ' : '') + it.a).join('\n\n');
 }
 function itemTexts(items) { // exactly what gets spoken, in order
-  const many = items.length > 1, out = [];
+  const many = items.length > 1, out = [], gem = S.voiceEngine === 'gemini';
   items.forEach((it, i) => {
-    const lead = many ? 'Number ' + (i + 1) + '. ' : '';
-    if (S.speakQuestion && it.q) { out.push(lead + it.q); out.push(it.a); } else out.push(lead + it.a);
+    const lead = many ? 'Number ' + (i + 1) + '.' : '';
+    if (gem && lead) out.push(lead); // ready-made, plays instantly while the answer is being voiced
+    const pre = !gem && lead ? lead + ' ' : '';
+    if (S.speakQuestion && it.q) { out.push(pre + it.q); out.push(it.a); } else out.push(pre + it.a);
   });
   return out;
 }
@@ -1041,7 +1099,7 @@ $('btnStart').onclick = async () => {
   if (running) return;
   $('btnStart').disabled = true; $('sub').textContent = 'Starting camera…';
   // These must happen inside a tap on iOS to unlock sound and speech:
-  audioCtx(); unlockSpeech();
+  audioCtx(); setAudioSession(); if (S.voiceEngine === 'device') unlockSpeech();
   setupMediaSession();
   try { await startCamera(); }
   catch (e) {
@@ -1085,39 +1143,28 @@ $('btnTestVoice').onclick = () => {
 let acReport = '';
 async function runAudioCheck() {
   audioCtx(); setAudioSession(); // inside the tap, so iOS allows sound
-  try { const u = new SpeechSynthesisUtterance('ready'); u.volume = 0; liveUtterances.add(u); u.onend = u.onerror = () => liveUtterances.delete(u); speechSynthesis.speak(u); } catch {}
   const out = $('acOut'), lines = [];
   const log = (t) => { lines.push(t); out.textContent = lines.join('\n'); acReport = lines.join('\n'); };
   const banner = (t) => { $('acBanner').textContent = t; };
-  const desc = (r) => r.started ? 'started' + (r.error ? ', then error: ' + r.error : ' and finished') : 'did NOT start' + (r.error ? ' (' + r.error + ')' : '');
   $('acHeard').hidden = true; $('btnAudioCheck').disabled = true; $('acMsg').textContent = '';
-  ['acH1', 'acH2', 'acH3', 'acH4', 'acH5'].forEach((id) => { $(id).checked = false; });
+  ['acH1', 'acH2', 'acH3'].forEach((id) => { $(id).checked = false; });
   log('App ' + APP_VERSION + ' · ' + (navigator.userAgent.match(/(iPhone|iPad)[^;)]*|OS [\d_]+|Version\/[\d.]+/g) || [navigator.userAgent.slice(0, 60)]).join(' · '));
-  log('Audio mode: ' + (navigator.audioSession ? navigator.audioSession.type : 'not supported') + ' · Web Audio: ' + actx.state +
-      ' · voices: ' + speechSynthesis.getVoices().length + ' · background sound: ' + (keepAlive && !keepAlive.paused ? 'playing' : 'off') +
-      ' · camera: ' + (track && track.readyState === 'live' ? 'on' : 'off'));
-  try { speechSynthesis.cancel(); } catch {}
-  await wakeAudio();
-  banner('1 of 5 — beep'); await beepNow('answer'); await sleep(600); log('1. Beep — played (Web Audio ' + actx.state + ')');
-  banner('2 of 5 — iPhone voice'); let r = await speakDeviceNow('Two. iPhone voice.'); log('2. iPhone voice — ' + desc(r)); await sleep(400);
-  banner('3 of 5 — iPhone voice, background sound paused');
-  if (keepAlive && !keepAlive.paused) { loopPausedForSpeech = true; keepAlive.pause(); }
-  r = await speakDeviceNow('Three. iPhone voice, background sound paused.'); log('3. iPhone voice, background paused — ' + desc(r));
-  loopPausedForSpeech = false; playLoop(); await sleep(400);
-  banner('4 of 5 — iPhone voice, normal audio mode');
-  const hadSession = !!navigator.audioSession;
-  try { if (hadSession) navigator.audioSession.type = 'auto'; } catch {}
-  r = await speakDeviceNow('Four. iPhone voice, normal audio mode.');
-  log('4. iPhone voice, normal audio mode — ' + desc(r) + (hadSession ? '' : ' (audio mode not supported: same as 2)'));
-  setAudioSession(); await sleep(400);
-  await wakeAudio();
-  banner('5 of 5 — Gemini voice (needs the updated Worker)');
+  await speechChain; // don't talk over an answer that is still being spoken
+  const c = await ensureAudioRunning();
+  log('Audio mode: ' + (navigator.audioSession ? navigator.audioSession.type : 'not supported') + ' · Web Audio: ' + c.state +
+      ' · background sound: ' + (keepAlive && !keepAlive.paused ? 'playing' : 'off') + ' · camera: ' + (track && track.readyState === 'live' ? 'on' : 'off'));
+  banner('1 of 3 — beep'); await beepNow('answer'); await sleep(600); log('1. Beep — played (Web Audio ' + c.state + ')');
+  banner('2 of 3 — Gemini voice');
   try {
-    const t0 = performance.now();
-    const b = await geminiVoiceBuffer('Five. Gemini voice. ' + new Date().toLocaleTimeString());
-    const ms = Math.round(performance.now() - t0);
-    await playBuffer(b); log('5. Gemini voice — played (took ' + ms + ' ms to make)');
-  } catch (e) { log('5. Gemini voice — FAILED: ' + e.message); }
+    const job = voiceJob('Two. Gemini voice. ' + new Date().toLocaleTimeString());
+    await playJob(job);
+    log('2. Gemini voice — played, ' + job.mode + ', first sound after ' + job.firstMs + ' ms (all made in ' + job.totalMs + ' ms)');
+  } catch (e) { log('2. Gemini voice — FAILED: ' + e.message); }
+  await sleep(300);
+  banner('3 of 3 — iPhone voice (for comparison)');
+  const r = await speakDeviceNow('Three. iPhone voice.');
+  log('3. iPhone voice — ' + (r.started ? 'started' + (r.error ? ', then error: ' + r.error : ' and finished') : 'did NOT start' + (r.error ? ' (' + r.error + ')' : '')));
+  await wakeAudio();
   banner('Done — tick the numbers you heard'); $('acHeard').hidden = false; $('btnAudioCheck').disabled = false;
 }
 function syncInputs(keys) {
@@ -1127,15 +1174,13 @@ $('btnAudioCheck').onclick = () => { runAudioCheck().catch((e) => { $('acBanner'
 $('acApply').onclick = () => {
   const h = (i) => $('acH' + i).checked;
   let msg;
-  if (h(2)) { S.voiceEngine = 'device'; S.pauseLoopForSpeech = true; S.audioSessionMode = 'playback'; msg = 'Set: iPhone voice.'; }
-  else if (h(3)) { S.voiceEngine = 'device'; S.pauseLoopForSpeech = true; S.audioSessionMode = 'playback'; msg = 'Set: iPhone voice, with the background sound paused while it speaks.'; }
-  else if (h(4)) { S.voiceEngine = 'device'; S.pauseLoopForSpeech = true; S.audioSessionMode = 'auto'; msg = 'Set: iPhone voice with the normal audio mode. (Beeps may now follow the silent switch.)'; }
-  else if (h(5)) { S.voiceEngine = 'gemini'; msg = 'Set: Gemini voice. It starts about a second later than the iPhone voice; the stall line is prepared in advance.'; }
+  if (h(2)) { S.voiceEngine = 'gemini'; msg = 'Set: Gemini voice (streamed through the same route as the beeps).'; }
+  else if (h(3)) { S.voiceEngine = 'device'; S.pauseLoopForSpeech = true; S.audioSessionMode = 'playback'; msg = 'Set: iPhone voice.'; }
   else msg = 'Nothing worked yet. Check: the silent switch on the left side of the phone (orange = silent), the volume while something plays, and Control Center → the audio-output icon is set to your earbuds. Then run the check again.';
   if (!h(1)) msg += ' You also did not hear the beep — check the volume and that the earbuds are the audio output.';
   saveSettings(); syncInputs(['voiceEngine', 'pauseLoopForSpeech', 'audioSessionMode']); setAudioSession();
   geminiVoiceDown = false; voiceFails = 0; prewarmVoice();
-  acReport += '\nHeard: ' + [1, 2, 3, 4, 5].filter(h).join(', ') + '\n' + msg;
+  acReport += '\nHeard: ' + [1, 2, 3].filter(h).join(', ') + '\n' + msg;
   $('acMsg').textContent = msg;
 };
 $('acCopy').onclick = async () => {

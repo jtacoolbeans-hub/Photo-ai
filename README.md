@@ -160,6 +160,21 @@ press any key, and it reconnects. It also keeps retrying quietly. If it keeps ha
 instead of the Home Screen icon (Home Screen apps re-ask for camera permission), and in Safari tap **aA →
 Website Settings → Camera → Allow**.
 
+### How the voice works (version 1.8)
+
+The iPhone's built-in web voice turned out to be silent while this page has the camera on (it reports
+"speaking" but nothing comes out), and it interrupted the beeps. So the app now speaks with the **Gemini
+voice**, played through the same route as the beeps, which you can hear:
+
+- The Worker **streams** the voice: the phone starts playing the first fraction of a second while Gemini is
+  still making the rest. If streaming isn't available for the voice model, it falls back to a whole file.
+- The stall line and "Number 1 … Number 6" are made when you press START, so they play instantly.
+- All answers on a page are voiced at the same time; repeats reuse the audio already made.
+- **Requires Worker version 4**: paste the new `worker/proxy.js` into Cloudflare (Step 3, steps 3–5).
+  Connection → Test connection tells you if it's out of date.
+
+The iPhone voice is still available under **Speech & sounds → Voice engine** for phones where it works.
+
 ### No voice? Run the audio check
 
 **Speech & sounds → 🔊 Run audio check.** It plays a beep and four numbered voices made in different ways:
