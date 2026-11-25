@@ -14,8 +14,8 @@
  */
 'use strict';
 
-const APP_VERSION = '1.8.0';
-const MIN_WORKER_VERSION = 4;
+const APP_VERSION = '1.9.0';
+const MIN_WORKER_VERSION = 5;
 
 // The first version of the prompt. Phones that saved it get the new one automatically.
 const OLD_PROMPT_V1 =
@@ -78,7 +78,7 @@ const DEFAULTS = {
   models: 'gemini-3.5-flash, gemini-flash-latest',
   mediaResolution: 'MEDIA_RESOLUTION_HIGH', thinking: 'minimal', maxTokens: 2048,
   prompt: DEFAULT_PROMPT, style: '', allItems: true,
-  voiceEngine: 'gemini', ttsVoice: 'Kore', ttsModel: 'gemini-2.5-flash-preview-tts', pauseLoopForSpeech: true, audioSessionMode: 'playback', freezeMode: 'speech',
+  voiceEngine: 'cf', cfModel: '@cf/myshell-ai/melotts', cfVoice: 'angus', ttsVoice: 'Kore', ttsModel: 'gemini-2.5-flash-preview-tts', pauseLoopForSpeech: true, audioSessionMode: 'playback', freezeMode: 'speech',
   maxSide: 2048, jpegQuality: 85,
   timeoutSec: 8, stallLine: 'Great question. Give me just a second with that one.',
   lateAnswer: true, lateSec: 15, retryNone: 1,
@@ -93,7 +93,7 @@ for (const k of CUE_KEYS) DEFAULTS['cue_' + k] = 'tone';
 
 // ---------------------------------------------------------------- settings
 const LS_KEY = 'cardAssistant.settings.v1';
-const SETTINGS_VER = 6;
+const SETTINGS_VER = 7;
 let S = loadSettings();
 function loadSettings() {
   let saved = {};
@@ -107,6 +107,7 @@ function loadSettings() {
     }
     if ([OLD_PROMPT_V1, OLD_QUESTION_V2, OLD_ANYTHING_V3].includes(saved.prompt)) delete saved.prompt;
     if ((saved.v || 1) < 4 && saved.maxTokens === 1024) delete saved.maxTokens; // longer pages need room for many answers
+    if ((saved.v || 1) < 7 && saved.voiceEngine !== 'device') delete saved.voiceEngine; // Gemini voice hit its free limits: Cloudflare voice is the default now
     if ((saved.v || 1) < 6) delete saved.voiceEngine; // the iPhone voice turned out silent while the camera runs: Gemini voice is the default now
     if ((saved.v || 1) < 5) delete saved.pauseLoopForSpeech; // now on by default: the background sound was cutting into speech
     saved.v = SETTINGS_VER;
@@ -137,7 +138,7 @@ function onSettingChanged(k) {
   if (k === 'camId' || k === 'res' || k === 'camFps') { safeMode = false; if (running) startCamera().catch((e) => { camNote = 'Camera error: ' + e.message; setSub(); }); }
   if (k === 'torch') applyTorch();
   if (k === 'useCrop') drawCropBox();
-  if (k === 'stallLine' || k === 'voiceEngine' || k === 'ttsVoice' || k === 'ttsModel') { geminiVoiceDown = false; voiceFails = 0; prewarmVoice(); }
+  if (['stallLine', 'voiceEngine', 'ttsVoice', 'ttsModel', 'cfModel', 'cfVoice'].includes(k)) { engineDown.cf = ''; engineDown.gemini = ''; prewarmVoice(); }
   if (k === 'audioSessionMode') setAudioSession();
 }
 
@@ -261,21 +262,13 @@ function cleanSpeech(text) { return String(text || '').replace(/[*_#`>]/g, '').r
 function speak(text) {
   text = cleanSpeech(text);
   if (!text) return Promise.resolve();
-  if (S.voiceEngine === 'gemini' && S.workerUrl && !geminiVoiceDown) {
-    const job = voiceJob(text); // starts making the voice NOW, while anything earlier is still being spoken
+  if (netVoice()) {
+    // Cloudflare voice: start making it NOW (several at once is fine). Gemini voice: one at a time (3 a minute free).
+    const first = voiceOrder()[0];
+    const job = first === 'cf' ? voiceJob(text, { engine: 'cf' }) : null;
     speechChain = speechChain.then(async () => {
       speaking = true; setSub();
-      try { await playJob(job); voiceFails = 0; if (/Gemini voice/.test(speechNote)) speechNote = ''; }
-      catch (e) {
-        sev('Gemini voice failed: ' + e.message + ' — trying a whole file');
-        try { await playJob(voiceJob(text, { stream: false })); voiceFails = 0; }
-        catch (e2) {
-          voiceFails++; if (voiceFails >= 3) geminiVoiceDown = true;
-          sev('Gemini voice failed again: ' + e2.message);
-          speechNote = 'Gemini voice failed (' + e2.message + ')';
-          await tone('failed');
-        }
-      } finally { speaking = false; setSub(); }
+      try { await playVoice(text, job); } finally { speaking = false; setSub(); }
     });
     return speechChain;
   }
@@ -352,14 +345,62 @@ function speakDeviceNow(text) {
 // the moment it arrives, back to back, through Web Audio (the route the beeps use, which you can hear).
 // Finished voices are kept, so the stall line, "Number 1…" and repeats are instant.
 const voiceJobs = new Map();
-let voiceFails = 0, geminiVoiceDown = false;
+const engineDown = { cf: '', gemini: '' }; // set when an engine can't be used this session (daily limit, not connected)
+function netVoice() { return (S.voiceEngine === 'cf' || S.voiceEngine === 'gemini') && !!S.workerUrl; }
+function voiceOrder() { // the chosen voice first, the other online voice as backup
+  return (S.voiceEngine === 'gemini' ? ['gemini', 'cf'] : ['cf', 'gemini']).filter((e) => !engineDown[e]);
+}
+function isQuota(m) { return /quota|exceeded|rate.?limit|RESOURCE_EXHAUSTED|\b429\b/i.test(String(m || '')); }
+// Turn Google's long error texts into one short line.
+function friendlyError(m) {
+  m = String(m || '');
+  if (isQuota(m)) {
+    const what = /per day|PerDay/i.test(m) ? 'daily' : /per minute|PerMinute/i.test(m) ? 'per-minute' : '';
+    const model = (/model: ([\w.\-]+)/.exec(m) || [])[1];
+    const r = /retry in ([\d.]+h)?([\d.]+m)?([\d.]+s)?/i.exec(m);
+    let wait = '';
+    if (r && (r[1] || r[2] || r[3])) {
+      const h = parseInt(r[1] || '0', 10), mi = parseInt(r[2] || '0', 10), se = Math.round(parseFloat(r[3] || '0'));
+      wait = h ? ' — resets in ' + h + ' h ' + mi + ' m' : mi ? ' — resets in ' + mi + ' min' : ' — try again in ' + se + ' s';
+    }
+    return 'Gemini free ' + (what ? what + ' ' : '') + 'limit reached' + (model ? ' (' + model + ')' : '') + wait;
+  }
+  return m.length > 160 ? m.slice(0, 157) + '…' : m;
+}
+// Say one line with the first voice that works; skip a voice for the rest of the session if it is out of quota.
+async function playVoice(text, firstJob) {
+  const errs = [];
+  for (const eng of voiceOrder()) {
+    const tries = eng === 'gemini' ? [{ stream: true }, { stream: false }] : [{}];
+    for (const t of tries) {
+      const job = (firstJob && firstJob.engine === eng && t.stream !== false) ? firstJob : voiceJob(text, { engine: eng, ...t });
+      try {
+        await playJob(job);
+        if (/^Voice/.test(speechNote)) speechNote = '';
+        return;
+      } catch (e) {
+        const msg = friendlyError(e.message);
+        errs.push((eng === 'cf' ? 'Cloudflare' : 'Gemini') + ': ' + msg);
+        sev((eng === 'cf' ? 'Cloudflare' : 'Gemini') + ' voice failed: ' + msg);
+        if (isQuota(e.message) || /not connected|out of date/i.test(e.message)) { engineDown[eng] = msg; break; }
+      }
+    }
+  }
+  if (!errs.length) { // every voice was already ruled out this session: say why
+    if (engineDown.cf) errs.push('Cloudflare: ' + engineDown.cf);
+    if (engineDown.gemini) errs.push('Gemini: ' + engineDown.gemini);
+  }
+  speechNote = 'Voice failed — ' + (errs.join(' · ') || 'no voice available');
+  await beepNow('failed');
+}
 function voiceJob(text, opts = {}) {
   text = cleanSpeech(text);
-  const stream = opts.stream !== false;
-  const key = S.ttsVoice + '|' + S.ttsModel + '|' + text;
+  const engine = opts.engine || (S.voiceEngine === 'gemini' ? 'gemini' : 'cf');
+  const stream = engine === 'gemini' && opts.stream !== false;
+  const key = engine + '|' + (engine === 'cf' ? S.cfModel + '|' + S.cfVoice : S.ttsVoice + '|' + S.ttsModel) + '|' + text;
   const have = voiceJobs.get(key);
   if (have && !have.failed) return have;
-  const job = { text, chunks: [], done: false, failed: null, mode: '', t0: performance.now(), firstMs: 0, totalMs: 0, waiters: [] };
+  const job = { text, engine, chunks: [], done: false, failed: null, mode: '', t0: performance.now(), firstMs: 0, totalMs: 0, waiters: [] };
   const wake = () => { job.waiters.splice(0).forEach((f) => f()); };
   job.wait = () => new Promise((r) => job.waiters.push(r));
   voiceJobs.set(key, job);
@@ -370,7 +411,7 @@ function voiceJob(text, opts = {}) {
       const r = await fetch(S.workerUrl.trim().replace(/\/$/, ''), {
         method: 'POST', signal: ctrl.signal,
         headers: { 'Content-Type': 'application/json', 'X-App-Token': S.token.trim() },
-        body: JSON.stringify({ tts: text, voice: S.ttsVoice, model: S.ttsModel, stream }),
+        body: JSON.stringify(engine === 'cf' ? { tts: text, engine: 'cf', cfModel: S.cfModel, cfVoice: S.cfVoice } : { tts: text, voice: S.ttsVoice, model: S.ttsModel, stream }),
       });
       if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || 'HTTP ' + r.status); }
       const ct = r.headers.get('Content-Type') || '';
@@ -440,9 +481,10 @@ async function playJob(job) {
   if (left > 0) await sleep(left * 1000 + 60);
 }
 function prewarmVoice() { // make the lines we know in advance, so they play instantly
-  if (S.voiceEngine !== 'gemini' || !S.workerUrl) return;
-  voiceJob(S.stallLine, { stream: false });
-  for (let n = 1; n <= 6; n++) voiceJob('Number ' + n + '.', { stream: false });
+  if (!netVoice()) return;
+  const eng = voiceOrder()[0]; if (!eng) return;
+  voiceJob(S.stallLine, { engine: eng, stream: false });
+  if (eng === 'cf') for (let n = 1; n <= 6; n++) voiceJob('Number ' + n + '.', { engine: 'cf' }); // Gemini: too few free requests to spare
 }
 
 // Must run inside a tap or key press: it "unlocks" speech and sound on iOS.
@@ -451,7 +493,7 @@ function unlockSpeech() {
     const u = new SpeechSynthesisUtterance('Ready');
     const v = speechSynthesis.getVoices().find((x) => x.voiceURI === S.voiceURI);
     if (v) u.voice = v;
-    u.lang = (v && v.lang) || 'en-US'; u.volume = (S.sayReady && S.voiceEngine !== 'gemini') ? 1 : 0;
+    u.lang = (v && v.lang) || 'en-US'; u.volume = (S.sayReady && S.voiceEngine === 'device') ? 1 : 0;
     liveUtterances.add(u); u.onend = u.onerror = () => liveUtterances.delete(u);
     speechSynthesis.speak(u);
   } catch {}
@@ -778,7 +820,7 @@ function thumbOf(canvas, max = 480) {
 // phase: 'idle' (disarmed) | 'watch' | 'collect' | 'busy' (thinking/speaking)
 let running = false, armed = false, phase = 'idle';
 let stillCount = 0, collect = null, needChange = false, nextAutoAt = 0, noneRetries = 0;
-let movedWhileBusy = false, skipNote = '', skipNoteAt = 0;
+let movedWhileBusy = false, skipNote = '', skipNoteAt = 0, readNote = '';
 let lastMotion = 0, lastSharp = 0, checks = 0, checksAt = performance.now(), fpsShown = 0;
 let last = { q: '', a: '', text: '' };
 let loopTimer = null;
@@ -924,6 +966,7 @@ async function runCapture(c) {
 
   const parsed = res.ok ? parseReply(res.text) : null;
   let next; // what to do once the entry is logged
+  readNote = !res.ok && isQuota(res.error) ? 'Card reading: ' + friendlyError(res.error) + ' — add more models or turn on billing' : '';
   if (!res.ok) { entry.status = 'fail'; next = 'stall'; }
   else if (!parsed) {
     if (c.source === 'auto' && noneRetries < (+S.retryNone || 0) && !stalled) { entry.status = 'none-retry'; next = 'retry'; }
@@ -933,7 +976,7 @@ async function runCapture(c) {
     entry.status = stalled ? 'late-answer' : 'answer'; next = 'speak';
     entry.items = parsed.items.length;
     last = { q: parsed.q, a: parsed.a, items: parsed.items, text: res.text };
-    if (S.voiceEngine === 'gemini') itemTexts(parsed.items).forEach((t) => voiceJob(t)); // start making the voice now
+    if (netVoice() && voiceOrder()[0] === 'cf') itemTexts(parsed.items).forEach((t) => voiceJob(t, { engine: 'cf' })); // start making the voice now
   }
   logCapture(entry); // logged BEFORE speaking, so it is saved even if something interrupts the speech
   showLast(entry);
@@ -986,7 +1029,7 @@ function displayItems(items) {
   return items.map((it, i) => (i + 1) + '. ' + (it.q ? it.q + '\n→ ' : '') + it.a).join('\n\n');
 }
 function itemTexts(items) { // exactly what gets spoken, in order
-  const many = items.length > 1, out = [], gem = S.voiceEngine === 'gemini';
+  const many = items.length > 1, out = [], gem = netVoice() && voiceOrder()[0] === 'cf'; // separate ready-made "Number 1." only with the Cloudflare voice
   items.forEach((it, i) => {
     const lead = many ? 'Number ' + (i + 1) + '.' : '';
     if (gem && lead) out.push(lead); // ready-made, plays instantly while the answer is being voiced
@@ -1051,6 +1094,7 @@ function setSub() {
   if (skipNote && Date.now() - skipNoteAt < 8000) bits.push(skipNote);
   if (needChange && armed && phase === 'watch') bits.push('waiting for card to change');
   if (speaking) bits.push('speaking');
+  if (readNote) bits.push('⚠ ' + readNote);
   if (speechNote) bits.push('⚠ ' + speechNote);
   $('sub').textContent = bits.join(' · ');
 }
@@ -1074,7 +1118,7 @@ function showLast(e) {
   const info = new Date(e.t).toLocaleTimeString() + ' · ' + (e.latencyMs / 1000).toFixed(1) + ' s · sharp ' + e.sharp +
     ' · ' + e.kb + ' KB · ' + (e.model || '');
   $('lastQ').textContent = last.q ? 'Card: ' + last.q : '';
-  $('lastA').textContent = isAns ? last.a : '(' + e.status + ') ' + (e.error || e.reply || '');
+  $('lastA').textContent = isAns ? last.a : '(' + e.status + ') ' + friendlyError(e.error || e.reply || '');
   if (isAns && last.items && last.items.length > 1) $('lastQ').textContent = last.items.length + ' items on this card';
   $('lastInfo').textContent = info;
   lastFull = { card: isAns && last.items && last.items.length > 1 ? last.items.length + ' items' : last.q, answer: isAns ? last.a : '', raw: e.reply || e.error || '', status: e.status, info };
@@ -1114,7 +1158,7 @@ $('btnStart').onclick = async () => {
   $('stage').classList.add('on');
   drawCropBox();
   await tone('start');
-  if (S.voiceEngine === 'gemini') { prewarmVoice(); if (S.sayReady) speak('Ready'); }
+  if (netVoice()) { prewarmVoice(); if (S.sayReady && voiceOrder()[0] === 'cf') speak('Ready'); }
   if (S.autoArm) setArmed(true);
   loop();
 };
@@ -1147,23 +1191,26 @@ async function runAudioCheck() {
   const log = (t) => { lines.push(t); out.textContent = lines.join('\n'); acReport = lines.join('\n'); };
   const banner = (t) => { $('acBanner').textContent = t; };
   $('acHeard').hidden = true; $('btnAudioCheck').disabled = true; $('acMsg').textContent = '';
-  ['acH1', 'acH2', 'acH3'].forEach((id) => { $(id).checked = false; });
+  ['acH1', 'acH2', 'acH3', 'acH4'].forEach((id) => { $(id).checked = false; });
   log('App ' + APP_VERSION + ' · ' + (navigator.userAgent.match(/(iPhone|iPad)[^;)]*|OS [\d_]+|Version\/[\d.]+/g) || [navigator.userAgent.slice(0, 60)]).join(' · '));
   await speechChain; // don't talk over an answer that is still being spoken
   const c = await ensureAudioRunning();
   log('Audio mode: ' + (navigator.audioSession ? navigator.audioSession.type : 'not supported') + ' · Web Audio: ' + c.state +
       ' · background sound: ' + (keepAlive && !keepAlive.paused ? 'playing' : 'off') + ' · camera: ' + (track && track.readyState === 'live' ? 'on' : 'off'));
-  banner('1 of 3 — beep'); await beepNow('answer'); await sleep(600); log('1. Beep — played (Web Audio ' + c.state + ')');
-  banner('2 of 3 — Gemini voice');
-  try {
-    const job = voiceJob('Two. Gemini voice. ' + new Date().toLocaleTimeString());
-    await playJob(job);
-    log('2. Gemini voice — played, ' + job.mode + ', first sound after ' + job.firstMs + ' ms (all made in ' + job.totalMs + ' ms)');
-  } catch (e) { log('2. Gemini voice — FAILED: ' + e.message); }
-  await sleep(300);
-  banner('3 of 3 — iPhone voice (for comparison)');
-  const r = await speakDeviceNow('Three. iPhone voice.');
-  log('3. iPhone voice — ' + (r.started ? 'started' + (r.error ? ', then error: ' + r.error : ' and finished') : 'did NOT start' + (r.error ? ' (' + r.error + ')' : '')));
+  banner('1 of 4 — beep'); await beepNow('answer'); await sleep(600); log('1. Beep — played (Web Audio ' + c.state + ')');
+  const stamp = new Date().toLocaleTimeString();
+  for (const [n, eng, name] of [[2, 'cf', 'Cloudflare voice'], [3, 'gemini', 'Gemini voice']]) {
+    banner(n + ' of 4 — ' + name);
+    try {
+      const job = voiceJob(['', '', 'Two', 'Three'][n] + '. ' + name + '. ' + stamp, { engine: eng, stream: eng === 'gemini' });
+      await playJob(job);
+      log(n + '. ' + name + ' — played, ' + job.mode + ', first sound after ' + job.firstMs + ' ms');
+    } catch (e) { log(n + '. ' + name + ' — FAILED: ' + friendlyError(e.message)); }
+    await sleep(300);
+  }
+  banner('4 of 4 — iPhone voice (for comparison)');
+  const r = await speakDeviceNow('Four. iPhone voice.');
+  log('4. iPhone voice — ' + (r.started ? 'started' + (r.error ? ', then error: ' + r.error : ' and finished') : 'did NOT start' + (r.error ? ' (' + r.error + ')' : '')));
   await wakeAudio();
   banner('Done — tick the numbers you heard'); $('acHeard').hidden = false; $('btnAudioCheck').disabled = false;
 }
@@ -1174,13 +1221,14 @@ $('btnAudioCheck').onclick = () => { runAudioCheck().catch((e) => { $('acBanner'
 $('acApply').onclick = () => {
   const h = (i) => $('acH' + i).checked;
   let msg;
-  if (h(2)) { S.voiceEngine = 'gemini'; msg = 'Set: Gemini voice (streamed through the same route as the beeps).'; }
-  else if (h(3)) { S.voiceEngine = 'device'; S.pauseLoopForSpeech = true; S.audioSessionMode = 'playback'; msg = 'Set: iPhone voice.'; }
+  if (h(2)) { S.voiceEngine = 'cf'; msg = 'Set: Cloudflare voice (free daily allowance; Gemini voice as backup).'; }
+  else if (h(3)) { S.voiceEngine = 'gemini'; msg = 'Set: Gemini voice. Note its free limit is small (about 10 lines a day).'; }
+  else if (h(4)) { S.voiceEngine = 'device'; S.pauseLoopForSpeech = true; S.audioSessionMode = 'playback'; msg = 'Set: iPhone voice.'; }
   else msg = 'Nothing worked yet. Check: the silent switch on the left side of the phone (orange = silent), the volume while something plays, and Control Center → the audio-output icon is set to your earbuds. Then run the check again.';
   if (!h(1)) msg += ' You also did not hear the beep — check the volume and that the earbuds are the audio output.';
   saveSettings(); syncInputs(['voiceEngine', 'pauseLoopForSpeech', 'audioSessionMode']); setAudioSession();
-  geminiVoiceDown = false; voiceFails = 0; prewarmVoice();
-  acReport += '\nHeard: ' + [1, 2, 3].filter(h).join(', ') + '\n' + msg;
+  engineDown.cf = ''; engineDown.gemini = ''; prewarmVoice();
+  acReport += '\nHeard: ' + [1, 2, 3, 4].filter(h).join(', ') + '\n' + msg;
   $('acMsg').textContent = msg;
 };
 $('acCopy').onclick = async () => {
@@ -1209,6 +1257,7 @@ $('btnTestConn').onclick = async () => {
       (j.tokenOk ? '✅' : '❌') + ' App token matches',
       (j.originOk ? '✅' : '❌') + ' This page is allowed',
       ((j.version || 1) >= MIN_WORKER_VERSION ? '✅ Worker is up to date' : '❌ Worker is OUT OF DATE — paste the new worker/proxy.js into Cloudflare'),
+      (j.ai ? '✅ Cloudflare voice connected' : '❌ Cloudflare voice not connected — add a Workers AI binding named AI (see README)'),
     ];
     out.textContent = lines.join('\n');
   } catch (e) { out.textContent = '❌ Could not reach the Worker: ' + e.message; }

@@ -160,6 +160,32 @@ press any key, and it reconnects. It also keeps retrying quietly. If it keeps ha
 instead of the Home Screen icon (Home Screen apps re-ask for camera permission), and in Safari tap **aA →
 Website Settings → Camera → Allow**.
 
+### Free voice: Cloudflare Workers AI (version 1.9, recommended)
+
+Gemini's voice has a tiny free limit (3 lines a minute, about 10 a day). The app's default voice is now
+**Cloudflare's own AI voice**, which runs inside your Worker on Cloudflare's free daily allowance — no Google
+quota, no extra key. Gemini's voice is kept as the backup. One-time setup on your phone:
+
+1. **dash.cloudflare.com** → **Workers & Pages** → **card-proxy** → **Settings** → **Bindings** → **Add**
+   → **Workers AI**. Variable name: `AI` (capital letters). Save / Deploy.
+2. **Edit code** → paste the new `worker/proxy.js` → **Deploy**.
+3. In the app: **Connection → Test connection** should show **✅ Worker is up to date** and
+   **✅ Cloudflare voice connected**. Then run **Speech & sounds → Audio check** and tick what you heard.
+
+If a voice runs out of its free allowance, the app stops asking it for the rest of the session and uses the
+other one; the status line shows a short message such as "Gemini free daily limit reached — resets in 11 h 47 m".
+
+### Card reading limits (Gemini)
+
+Reading cards also uses Gemini, and its free tier is small too (your error showed 20 a day for
+`gemini-3.6-flash`). Two ways round it:
+
+- **Add more models** under **Gemini → Models to try**, separated by commas. Each Gemini model has its own
+  free allowance, and when one is used up the Worker moves on to the next. Check the current models and
+  limits at **aistudio.google.com → Rate limits**.
+- **Turn on billing** for your Gemini API key in AI Studio. Each card then costs a tiny fraction of a cent
+  and the limits are far higher. For real shows this is the safe option: a free limit can run out mid-show.
+
 ### How the voice works (version 1.8)
 
 The iPhone's built-in web voice turned out to be silent while this page has the camera on (it reports

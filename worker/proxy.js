@@ -29,11 +29,14 @@
  *     -> an audio/wav file of Gemini reading the words (the app plays it like music,
  *        which works even when the iPhone's silent switch is on).
  *   GEMINI_TTS_MODEL (Text, optional) default voice model, e.g. gemini-2.5-flash-preview-tts
+ *   POST / with { tts: "words", engine: "cf" } -> Cloudflare Workers AI voice instead of Gemini.
+ *     Needs a Workers AI binding named AI (Worker -> Settings -> Bindings -> Add -> Workers AI).
  */
 
-const WORKER_VERSION = 4;
+const WORKER_VERSION = 5;
 const DEFAULT_MODEL = 'gemini-flash-latest';
 const DEFAULT_TTS_MODEL = 'gemini-2.5-flash-preview-tts';
+const DEFAULT_CF_TTS = '@cf/myshell-ai/melotts'; // Cloudflare Workers AI voice (free daily allowance)
 const MAX_BODY_BYTES = 15 * 1024 * 1024; // ~15 MB of JSON (base64 photo)
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/';
 
@@ -74,6 +77,7 @@ export default {
         originOk,
         defaultModel: env.GEMINI_MODEL || DEFAULT_MODEL,
         tts: true,
+        ai: !!env.AI,
       });
     }
 
@@ -93,7 +97,7 @@ export default {
       return json({ error: 'Body must be JSON' }, 400);
     }
 
-    if (typeof body.tts === 'string') return handleTts(env, body, cors, json, ctx);
+    if (typeof body.tts === 'string') return body.engine === 'cf' ? handleCfTts(env, body, cors, json) : handleTts(env, body, cors, json, ctx);
 
     let image = String(body.image || '');
     let mimeType = String(body.mimeType || 'image/jpeg');
@@ -154,6 +158,29 @@ export default {
     }, timedOut ? 504 : 502);
   },
 };
+
+// Text -> speech with Cloudflare Workers AI (no Google quota; uses the account's free daily allowance).
+async function handleCfTts(env, body, cors, json) {
+  if (!env.AI) return json({ error: 'Cloudflare voice is not connected: add a Workers AI binding named AI to this Worker' }, 501);
+  const text = String(body.tts).trim().slice(0, 2000);
+  if (!text) return json({ error: 'No text to speak' }, 400);
+  const model = /^@cf\/[\w.\-\/]{3,80}$/.test(String(body.cfModel || '')) ? String(body.cfModel) : DEFAULT_CF_TTS;
+  const input = /aura/i.test(model)
+    ? { text, speaker: /^[a-z\-]{2,30}$/.test(String(body.cfVoice || '')) ? String(body.cfVoice) : 'angus', encoding: 'mp3' }
+    : { prompt: text, lang: 'en' };
+  const t0 = Date.now();
+  let out;
+  try { out = await env.AI.run(model, input); }
+  catch (e) { return json({ error: 'Cloudflare voice failed: ' + ((e && e.message) || String(e)) }, 502); }
+  let bytes = null;
+  if (out && typeof out.getReader === 'function') bytes = new Uint8Array(await new Response(out).arrayBuffer());
+  else if (out instanceof ArrayBuffer) bytes = new Uint8Array(out);
+  else if (out instanceof Uint8Array) bytes = out;
+  else if (out && typeof out.audio === 'string') bytes = b64ToBytes(out.audio);
+  if (!bytes || bytes.length < 100) return json({ error: 'Cloudflare voice returned no audio' }, 502);
+  const ct = (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46) ? 'audio/wav' : 'audio/mpeg';
+  return new Response(bytes, { headers: { ...cors, 'Content-Type': ct, 'Cache-Control': 'no-store', 'X-Tts-Mode': 'file', 'X-Gemini-Ms': String(Date.now() - t0) } });
+}
 
 // Text -> speech with Gemini, returned as a WAV file.
 async function handleTts(env, body, cors, json, ctx) {
