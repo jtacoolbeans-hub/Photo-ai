@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.13.0';
+const APP_VERSION = '1.13.2';
 const MIN_WORKER_VERSION = 5;
 const RECOMMENDED_WORKER_VERSION = 8; // 8 = Deepgram voice, Gemini model list, cheapest Cloudflare voice first
 
@@ -63,9 +63,27 @@ const OLD_ANYTHING_V4 =
 const OLD_QUESTION_V4 =
   'The photo shows a paper card or page with printed questions. A stage performer will hear your answers through an earbud.\n' +
   'Answer each question correctly and briefly.\n' + OLD_MULTI_V4;
-const MULTI_FORMAT =
+const OLD_MULTI_V5 =
   'If the card or page has several questions or items, handle EVERY one, in order from top to bottom.\n' +
   'Reply in exactly this format and nothing else, one pair per item (just Q1/A1 if there is only one):\n' +
+  'Q1: <item 1, in at most 12 words>\n' +
+  'A1: <your reply to item 1: one to three short sentences to be spoken aloud, plain words only, no lists, symbols or markdown>\n' +
+  'Q2: <item 2>\nA2: <reply to item 2>\n(and so on)\n' +
+  'Always give your best reply, even if the print is small or slightly unclear. ' +
+  'Reply with just the word NONE if nothing on the card can be read, OR if the photo does not show a card or page at all ' +
+  '(for example it shows a room, a TV screen, a person or an object): never describe or comment on what else is in the picture.';
+const OLD_ANYTHING_V5 =
+  "The photo shows a card or page held up during a live show. Your reply is spoken into the performer's earbud, so it must be quick and natural.\n" +
+  'Whatever is written — a question, a word, a name, a topic, a statement, a number, a prompt or an instruction — respond to it directly ' +
+  'and helpfully, like a quick-witted friend. If it asks something, answer it. If it is a topic, name or word, say something short, ' +
+  'interesting or funny about it. If it is an instruction, carry it out.\n' + OLD_MULTI_V5;
+const OLD_QUESTION_V5 =
+  'The photo shows a paper card or page with printed questions. A stage performer will hear your answers through an earbud.\n' +
+  'Answer each question correctly and briefly.\n' + OLD_MULTI_V5;
+const MULTI_FORMAT =
+  'If the card or page has several questions or items, handle EVERY one, in order from top to bottom.\n' +
+  'Reply in exactly this format and nothing else, one pair per item (just Q1/A1 if there is only one). Start your reply immediately with "Q1:": ' +
+  'never write an introduction, a heading, "---" lines or markdown, and do not repeat the question inside the answer:\n' +
   'Q1: <item 1, in at most 12 words>\n' +
   'A1: <your reply to item 1: one to three short sentences to be spoken aloud, plain words only, no lists, symbols or markdown>\n' +
   'Q2: <item 2>\nA2: <reply to item 2>\n(and so on)\n' +
@@ -113,7 +131,7 @@ for (const k of CUE_KEYS) DEFAULTS['cue_' + k] = 'tone';
 
 // ---------------------------------------------------------------- settings
 const LS_KEY = 'cardAssistant.settings.v1';
-const SETTINGS_VER = 11;
+const SETTINGS_VER = 12;
 let S = loadSettings();
 function loadSettings() {
   let saved = {};
@@ -125,7 +143,7 @@ function loadSettings() {
       const old = { thinking: '', res: 'max', stillFrames: 3, windowFrames: 4, watchFps: 3, activeFps: 8 };
       for (const k in old) if (saved[k] === old[k]) delete saved[k];
     }
-    if ([OLD_PROMPT_V1, OLD_QUESTION_V2, OLD_ANYTHING_V3, OLD_ANYTHING_V4, OLD_QUESTION_V4].includes(saved.prompt)) delete saved.prompt;
+    if ([OLD_PROMPT_V1, OLD_QUESTION_V2, OLD_ANYTHING_V3, OLD_ANYTHING_V4, OLD_QUESTION_V4, OLD_ANYTHING_V5, OLD_QUESTION_V5].includes(saved.prompt)) delete saved.prompt;
     if ((saved.v || 1) < 4 && saved.maxTokens === 1024) delete saved.maxTokens; // longer pages need room for many answers
     if ((saved.v || 1) < 11) { // the free Cloudflare allowance is small: use the cheaper model, and 'auto' picks the best voice you have
       if (saved.voiceEngine === 'cf' || saved.voiceEngine === 'gemini') delete saved.voiceEngine;
@@ -217,7 +235,7 @@ function audioCtx() {
     actx.onstatechange = () => {
       sev('Web Audio ' + actx.state);
       // Only wake it when nothing is being said: on iOS, waking Web Audio mid-sentence silently kills the iPhone voice.
-      if (running && !audioQuiet && !speaking && loopHold === 0 && actx.state !== 'running' && actx.state !== 'closed') actx.resume().catch(() => {});
+      if (running && !audioQuiet && !deviceSpeaking && loopHold === 0 && actx.state !== 'running' && actx.state !== 'closed') actx.resume().catch(() => {});
     };
   }
   if (actx.state !== 'running') actx.resume().catch(() => {});
@@ -258,7 +276,7 @@ function beepNow(name) {
 }
 
 // ---------------------------------------------------------------- speech
-let speaking = false, speechChain = Promise.resolve(), speechNote = '';
+let speaking = false, deviceSpeaking = false, speakProg = null, speechChain = Promise.resolve(), speechNote = '';
 const liveUtterances = new Set(); // keep references: Safari can drop an utterance that gets garbage-collected mid-speech
 let loopPausedForSpeech = false, loopHold = 0, loopResumeTimer = null, audioQuiet = false;
 // Put Web Audio (the beeps) to sleep before the iPhone voice talks, and wake it only after speech is over.
@@ -299,7 +317,15 @@ function releaseLoop() {
 function playLoop() { if (keepAlive && loopHold === 0 && !loopPausedForSpeech) keepAlive.play().catch(() => {}); }
 
 // Queue something to be said. Long text is split into sentences (iOS can cut off long utterances).
-function cleanSpeech(text) { return String(text || '').replace(/[*_#`>]/g, '').replace(/\s+/g, ' ').trim(); }
+function cleanSpeech(text) { // make written text sound right: no "---" lines, markdown, "m^2", "×", "≈", "°"
+  return String(text || '')
+    .replace(/^\s*[-=_*~]{3,}\s*$/gm, ' ')
+    .replace(/[*_#`>]/g, '')
+    .replace(/\^2(?![\d])/g, ' squared').replace(/\^3(?![\d])/g, ' cubed').replace(/\^\(?(-?[\d.]+)\)?/g, ' to the power $1')
+    .replace(/×/g, ' times ').replace(/÷/g, ' divided by ').replace(/≈/g, ' about ').replace(/≤/g, ' at most ').replace(/≥/g, ' at least ')
+    .replace(/°/g, ' degrees').replace(/[→⇒➜]/g, ' ').replace(/\s+–\s+|\s+—\s+/g, ', ')
+    .replace(/\s+/g, ' ').trim();
+}
 function speak(text) {
   text = cleanSpeech(text);
   if (!text) return Promise.resolve();
@@ -312,8 +338,9 @@ function speak(text) {
     const jobs = isParallel(first) ? pieces.map((c) => voiceJob(c, { engine: first })) : [];
     speechChain = speechChain.then(async () => {
       speaking = true; setSub();
-      try { for (let i = 0; i < pieces.length; i++) await playVoice(pieces[i], jobs[i], i < pieces.length - 1); }
-      finally { speaking = false; setSub(); }
+      sev('speaking ' + pieces.length + ' piece' + (pieces.length > 1 ? 's' : '') + ', ' + text.length + ' characters');
+      try { for (let i = 0; i < pieces.length; i++) { speakProg = { i: i + 1, n: pieces.length }; setSub(); await playVoice(pieces[i], jobs[i], i < pieces.length - 1); } }
+      finally { speaking = false; speakProg = null; setSub(); }
     });
     return speechChain;
   }
@@ -356,6 +383,7 @@ function splitSpeech(text) {
 function speakDeviceNow(text) {
   return new Promise((resolve) => {
     let done = false, started = false, tries = 0, cur = null, kick = null, poll = null, errName = '';
+    deviceSpeaking = true;
     const dm = deviceMode();
     try { if (navigator.audioSession) navigator.audioSession.type = dm.session; } catch {}
     if (dm.loop === 'play' && keepAlive && keepAlive.paused && running) keepAlive.play().catch(() => {});
@@ -371,7 +399,7 @@ function speakDeviceNow(text) {
       finish();
     }, limit);
     const finish = () => {
-      if (done) return; done = true; speaking = false; clearTimeout(total); clearTimeout(kick); clearInterval(poll);
+      if (done) return; done = true; speaking = false; deviceSpeaking = false; clearTimeout(total); clearTimeout(kick); clearInterval(poll);
       setAudioSession(); // back to the normal audio mode
       setSub(); resolve({ started, error: errName });
     };
@@ -402,7 +430,7 @@ function speakDeviceNow(text) {
         // iOS sometimes skips the "started" event while it IS talking: never cut that off
         if (speechSynthesis.speaking && !speechSynthesis.pending) { started = true; sev('no start event, but it is talking — leaving it alone'); return; }
         sev('voice did not start — retrying');
-        if (tries < 2) { try { speechSynthesis.cancel(); } catch {} cur = null; setTimeout(say, 200); }
+        if (tries < 2) { try { speechSynthesis.cancel(); } catch {} cur = null; setTimeout(say, 500); } // iOS drops a speak() that comes right after cancel()
         else { speechNote = 'Speech is not starting — run Speech & sounds → Audio check'; setSub(); }
       }, 3000);
     };
@@ -567,7 +595,9 @@ function voiceJob(text, opts = {}) {
   voiceJobs.set(key, job);
   if (voiceJobs.size > 80) voiceJobs.delete(voiceJobs.keys().next().value);
   (async () => {
-    const ctrl = new AbortController(), tm = setTimeout(() => ctrl.abort(), engine === 'gemini' ? 25000 : 15000);
+    const ctrl = new AbortController();
+    let tm = setTimeout(() => ctrl.abort(), engine === 'gemini' ? 25000 : 15000); // time allowed until the first data
+    const idle = () => { clearTimeout(tm); tm = setTimeout(() => ctrl.abort(), 12000); }; // then: no data for 12 s means stalled (a long piece may take longer than that in total)
     try {
       const cached = S.cacheClips !== false && !opts.nocache && text.length <= 160 ? await clipGet(key).catch(() => null) : null;
       if (cached) { // made before and kept on the phone: free and instant
@@ -591,6 +621,7 @@ function voiceJob(text, opts = {}) {
         let carry = null;
         for (;;) {
           const { done, value } = await reader.read();
+          idle();
           if (value && value.length) {
             let bytes = value;
             if (carry) { const m = new Uint8Array(carry.length + bytes.length); m.set(carry); m.set(bytes, carry.length); bytes = m; carry = null; }
@@ -650,9 +681,14 @@ async function playJob(job, more = false) {
   }
   if (!any) throw job.failed || new Error('no audio');
   voiceClock = t;
-  const left = t - c.currentTime;
-  // if another piece follows, come back a moment BEFORE this one ends, so the next one is already queued
-  if (left > 0) await sleep(more ? Math.max(0, left * 1000 - 250) : left * 1000 + 60);
+  // Wait until the audio has really played (by the audio clock, which stops if iOS interrupts it), waking it if it was
+  // interrupted. If another piece follows, come back a moment BEFORE this one ends so the next is already queued.
+  const wantEnd = more ? t - 0.25 : t + 0.06;
+  const guard = performance.now() + Math.max(2500, (t - c.currentTime) * 3000 + 4000);
+  while (c.currentTime < wantEnd && performance.now() < guard) {
+    if (c.state !== 'running' && c.state !== 'closed') { sev('Web Audio ' + c.state + ' while speaking — waking it'); await c.resume().catch(() => {}); }
+    await sleep(80);
+  }
 }
 function prewarmVoice() { // make the short fixed lines in advance (once ever: they are then kept on the phone)
   if (!netVoice()) return;
@@ -667,7 +703,7 @@ function unlockSpeech() {
     const u = new SpeechSynthesisUtterance('Ready');
     const v = speechSynthesis.getVoices().find((x) => x.voiceURI === S.voiceURI);
     if (v) u.voice = v;
-    u.lang = (v && v.lang) || 'en-US'; u.volume = (S.sayReady && S.voiceEngine === 'device') ? 1 : 0;
+    u.lang = (v && v.lang) || 'en-US'; u.volume = (S.sayReady && S.voiceEngine === 'device') ? 1 : 0.01;
     liveUtterances.add(u); u.onend = u.onerror = () => liveUtterances.delete(u);
     speechSynthesis.speak(u);
   } catch {}
@@ -1357,16 +1393,17 @@ function parseReply(text) {
   if (!text || /^\W*NONE\W*$/i.test(text) || /^NONE\b/i.test(text)) return null;
   const items = []; let cur = null, field = null;
   for (const raw of text.split('\n')) {
-    const line = raw.trim(); if (!line) continue;
+    const line = raw.trim(); if (!line || /^[-=_*~\s]{3,}$/.test(line)) continue; // blank lines and ---- rules
     let m;
     if ((m = line.match(/^\W*Q\s*\d*\s*:\s*(.*)$/i))) { cur = { q: unmark(m[1]), a: '' }; items.push(cur); field = 'q'; }
     else if ((m = line.match(/^\W*A\s*\d*\s*:\s*(.*)$/i))) {
       if (!cur || cur.a) { cur = { q: '', a: '' }; items.push(cur); }
       cur.a = unmark(m[1]); field = 'a';
     } else if (cur && field) cur[field] = (cur[field] ? cur[field] + ' ' : '') + unmark(line);
-    else { cur = { q: '', a: line }; items.push(cur); field = 'a'; } // no labels at all: it's the answer
+    else { cur = { q: '', a: line, pre: !items.length || items.every((x) => x.pre) }; items.push(cur); field = 'a'; } // no labels at all: it's the answer
   }
-  const good = items.filter((it) => it.a && !/^NONE\.?$/i.test(it.a));
+  const labeled = items.some((it) => !it.pre);
+  const good = items.filter((it) => it.a && !/^NONE\.?$/i.test(it.a) && !(labeled && it.pre)); // text before the first Q1: is just an introduction
   if (!good.length) return null;
   return { q: good.map((it) => it.q).filter(Boolean).join(' | '), a: displayItems(good), items: good };
 }
@@ -1376,14 +1413,18 @@ function displayItems(items) {
   return items.map((it, i) => (i + 1) + '. ' + (it.q ? it.q + '\n→ ' : '') + it.a).join('\n\n');
 }
 // Longest thing we will speak in one go (characters). Keeps the free voice allowance going and the show moving.
+let lastBudgetNote = 0;
 function budgetTexts(list) {
-  const max = +S.maxVoiceChars || 0; if (!max) return list;
+  // The cap exists to protect the tiny free allowances (Cloudflare, Gemini). Deepgram and the iPhone voice read everything.
+  const first = netVoice() ? voiceOrder()[0] : 'device';
+  const max = (first === 'cf' || first === 'gemini') ? (+S.maxVoiceChars || 0) : 0; if (!max) return list;
   const out = []; let total = 0;
   for (const t of list) {
     if (total + t.length <= max) { out.push(t); total += t.length; continue; }
     const room = max - total;
     if (room > 60) { const cut = t.lastIndexOf('. ', room); out.push(cut > 30 ? t.slice(0, cut + 1) : t.slice(0, room)); }
-    sev('answer shortened to fit the ' + max + '-character voice limit');
+    if (Date.now() - lastBudgetNote > 3000) sev('answer shortened to fit the ' + max + '-character voice limit');
+    lastBudgetNote = Date.now();
     break;
   }
   return out;
@@ -1453,7 +1494,7 @@ function setSub() {
   if (camNote) bits.unshift(camNote);
   if (skipNote && Date.now() - skipNoteAt < 8000) bits.push(skipNote);
   if (needChange && armed && phase === 'watch') bits.push('waiting for card to change');
-  if (speaking) bits.push('speaking');
+  if (speaking) bits.push(speakProg && speakProg.n > 1 ? 'speaking ' + speakProg.i + ' of ' + speakProg.n : 'speaking');
   if (armed && phase === 'watch' && !lastPage.present && !needChange && S.pageDetect !== 'off') bits.push('no page in view (' + lastPage.reason + ')');
   if (readNote) bits.push('⚠ ' + readNote);
   if (speechNote) bits.push('⚠ ' + speechNote);
@@ -1520,7 +1561,7 @@ $('btnStart').onclick = async () => {
   if (running) return;
   $('btnStart').disabled = true; $('sub').textContent = 'Starting camera…';
   // These must happen inside a tap on iOS to unlock sound and speech:
-  audioCtx(); setAudioSession(); if (S.voiceEngine === 'device') unlockSpeech();
+  audioCtx(); unlockSpeech(); // iOS ignores speech until the page has spoken once DURING a tap, so always do it here (silently, unless the iPhone voice is chosen)
   setupMediaSession();
   try { await startCamera(); }
   catch (e) {
@@ -1567,7 +1608,7 @@ $('btnTestVoice').onclick = () => {
 let acReport = '';
 let acTests = [];
 async function runAudioCheck() {
-  audioCtx(); setAudioSession(); // inside the tap, so iOS allows sound
+  audioCtx(); unlockSpeech(); // inside the tap, so iOS allows sound and speech
   const out = $('acOut'), lines = [];
   const log = (t) => { lines.push(t); out.textContent = lines.join('\n'); acReport = lines.join('\n'); };
   const banner = (t) => { $('acBanner').textContent = t; };
@@ -1618,7 +1659,7 @@ async function applyDeviceMode(v) {
   await sleep(300);
 }
 async function runLab() {
-  audioCtx(); setAudioSession(); // inside the tap
+  audioCtx(); unlockSpeech(); // inside the tap
   const out = $('labOut'), lines = [];
   const log = (t) => { lines.push(t); out.textContent = lines.join('\n'); labReport = lines.join('\n'); };
   const banner = (t) => { $('labBanner').textContent = t; };
@@ -1626,7 +1667,8 @@ async function runLab() {
   const prev = S.deviceMode, names = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six'];
   log('App ' + APP_VERSION + ' · ' + (navigator.userAgent.match(/(iPhone|iPad)[^;)]*|OS [\d_]+|Version\/[\d.]+/g) || [navigator.userAgent.slice(0, 60)]).join(' · '));
   log('Audio mode: ' + (navigator.audioSession ? navigator.audioSession.type : 'not supported') + ' · voices: ' + speechSynthesis.getVoices().length + ' · camera: ' + (track && track.readyState === 'live' ? 'on' : 'off'));
-  await speechChain; try { speechSynthesis.cancel(); } catch {}
+  await speechChain;
+  if (speechSynthesis.speaking || speechSynthesis.pending) { try { speechSynthesis.cancel(); } catch {} await sleep(500); } // iOS drops a speak() that comes right after cancel()
   await ensureAudioRunning();
   for (const v of LAB_VARIANTS) {
     banner('Voice ' + v.id + ' of ' + LAB_VARIANTS.length + ' — ' + v.label);

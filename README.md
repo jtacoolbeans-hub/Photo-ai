@@ -198,13 +198,21 @@ tens of thousands of answers — check the amount on their sign-up page). It is 
 **Gemini voice** now accepts several models (comma-separated under **Gemini voice model**): each model has its own free
 quota, and when one is used up the next is tried.
 
+### If reading stops part-way
+
+The progress shows in the status line ("speaking 2 of 4"), and the sound log says how many pieces and characters each answer has.
+Things that used to cut it off, all fixed: the 500-character cap (it now only applies to the small free Cloudflare and Gemini
+voices, never to Deepgram or the iPhone voice), a whole-download time limit on long pieces (now "no data for 12 seconds"),
+and iOS pausing the audio mid-sentence (it is now woken again straight away). Replies that start with an introduction
+("Here are the solutions…") no longer have the introduction read as answer 1, and "---" lines, "m^2", "×", "≈" and "°" are read naturally.
+
 ### The iPhone voice (unlimited and free): the lab
 
 The iPhone's own voice has no limits, but on your phone it spoke without any sound. iOS decides whether speech is audible
 (for example with the silent switch on) from what else the page is doing with sound, and the earlier set-up paused
 everything during speech. **Speech & sounds → 🔬 iPhone voice lab** plays "Voice one … six" in six different audio
 set-ups. Run it once with the **silent switch** (left side of the phone) *not* showing orange, tick what you heard, and tap
-**Use it**: that set-up is saved and the iPhone voice is selected. If you heard nothing, flip the switch and run it again, then
+**Use it**: that set-up is saved and the iPhone voice is selected. (iOS only lets speech start after the page has spoken once during a tap; versions before 1.13.1 skipped that unless the iPhone voice was selected, which made every lab voice say "did NOT start". Update first.) If you heard nothing, flip the switch and run it again, then
 **Copy report** and paste it to Claude. If it works you no longer need any online voice.
 
 ### Page detection (saves your Gemini calls)
