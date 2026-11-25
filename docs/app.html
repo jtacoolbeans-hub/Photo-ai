@@ -262,7 +262,7 @@
       <option>Kore</option><option>Puck</option><option>Charon</option><option>Aoede</option><option>Fenrir</option><option>Leda</option><option>Orus</option><option>Zephyr</option></select></div>
     <div><label>Gemini voice model</label><input type="text" data-k="ttsModel" autocapitalize="off" autocorrect="off"></div>
   </div>
-  <label class="chk"><input type="checkbox" data-k="pauseLoopForSpeech"> Pause the background sound while the iPhone voice speaks</label>
+  <label class="chk"><input type="checkbox" data-k="pauseLoopForSpeech"> Pause the background sound while speaking (recommended: stops the voice fading out)</label>
   <label>Audio mode</label>
   <select data-k="audioSessionMode"><option value="playback">Playback — ignore the silent switch (default)</option><option value="auto">Normal</option></select>
   <label>iPhone voice</label>
@@ -277,7 +277,7 @@
   <label>Cues — choose what each one does (▶ tries it)</label>
   <div id="cueList"></div>
   <div class="hint" id="vibNote"></div>
-  <button id="btnTestVoice">Test voice</button>
+  <button id="btnTestVoice">Test voice</button><button id="btnCopyEvents">Copy sound log</button>
   <div class="hint mono" id="speechInfo"></div>
 </details>
 

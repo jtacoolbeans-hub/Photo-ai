@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.6.0';
 const MIN_WORKER_VERSION = 2;
 
 // The first version of the prompt. Phones that saved it get the new one automatically.
@@ -78,7 +78,7 @@ const DEFAULTS = {
   models: 'gemini-3.5-flash, gemini-flash-latest',
   mediaResolution: 'MEDIA_RESOLUTION_HIGH', thinking: 'minimal', maxTokens: 2048,
   prompt: DEFAULT_PROMPT, style: '', allItems: true,
-  voiceEngine: 'device', ttsVoice: 'Kore', ttsModel: 'gemini-2.5-flash-preview-tts', pauseLoopForSpeech: false, audioSessionMode: 'playback',
+  voiceEngine: 'device', ttsVoice: 'Kore', ttsModel: 'gemini-2.5-flash-preview-tts', pauseLoopForSpeech: true, audioSessionMode: 'playback',
   maxSide: 2048, jpegQuality: 85,
   timeoutSec: 8, stallLine: 'Great question. Give me just a second with that one.',
   lateAnswer: true, lateSec: 15, retryNone: 1,
@@ -93,7 +93,7 @@ for (const k of CUE_KEYS) DEFAULTS['cue_' + k] = 'tone';
 
 // ---------------------------------------------------------------- settings
 const LS_KEY = 'cardAssistant.settings.v1';
-const SETTINGS_VER = 4;
+const SETTINGS_VER = 5;
 let S = loadSettings();
 function loadSettings() {
   let saved = {};
@@ -107,6 +107,7 @@ function loadSettings() {
     }
     if ([OLD_PROMPT_V1, OLD_QUESTION_V2, OLD_ANYTHING_V3].includes(saved.prompt)) delete saved.prompt;
     if ((saved.v || 1) < 4 && saved.maxTokens === 1024) delete saved.maxTokens; // longer pages need room for many answers
+    if ((saved.v || 1) < 5) delete saved.pauseLoopForSpeech; // now on by default: the background sound was cutting into speech
     saved.v = SETTINGS_VER;
     try { localStorage.setItem(LS_KEY, JSON.stringify(saved)); } catch {}
   }
@@ -180,7 +181,10 @@ const TONES = {
   failed:   [[311, .14], [0, .06], [233, .22]],
 };
 function audioCtx() {
-  if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+  if (!actx) {
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    actx.onstatechange = () => { sev('Web Audio ' + actx.state); if (running && actx.state !== 'running' && actx.state !== 'closed') actx.resume().catch(() => {}); };
+  }
   if (actx.state !== 'running') actx.resume().catch(() => {});
   return actx;
 }
@@ -195,6 +199,7 @@ function tone(name) {
   if (CAN_VIBRATE && (mode === 'vibrate' || mode === 'both')) { try { navigator.vibrate(VIBES[name] || [50]); } catch {} }
   const seq = TONES[name];
   if (mode === 'off' || mode === 'vibrate' || !seq || !(S.toneVol > 0)) return Promise.resolve();
+  if (speaking || loopHold > 0) { sev('beep "' + name + '" skipped (speaking)'); return Promise.resolve(); } // never beep over the voice
   return beepNow(name);
 }
 function beepNow(name) {
@@ -220,7 +225,27 @@ function beepNow(name) {
 // ---------------------------------------------------------------- speech
 let speaking = false, speechChain = Promise.resolve(), speechNote = '';
 const liveUtterances = new Set(); // keep references: Safari can drop an utterance that gets garbage-collected mid-speech
-let loopPausedForSpeech = false;
+let loopPausedForSpeech = false, loopHold = 0, loopResumeTimer = null;
+// Recent sound events, for "Copy sound log" — shows exactly what interrupted the voice.
+const sevents = [];
+function sev(t) { sevents.push(new Date().toTimeString().slice(0, 8) + '.' + String(Date.now() % 1000).padStart(3, '0') + '  ' + t); if (sevents.length > 120) sevents.shift(); }
+// While anything is being said, the background loop is held: paused (by default) and NEVER restarted, so it
+// can't cut into the voice. It resumes 0.8 s after the last thing is said (not between sentences or items).
+function holdLoop() {
+  loopHold++; clearTimeout(loopResumeTimer);
+  if (S.pauseLoopForSpeech && keepAlive && !keepAlive.paused) { loopPausedForSpeech = true; keepAlive.pause(); sev('background sound paused for speech'); }
+}
+function releaseLoop() {
+  loopHold = Math.max(0, loopHold - 1);
+  if (loopHold > 0) return;
+  clearTimeout(loopResumeTimer);
+  loopResumeTimer = setTimeout(() => {
+    if (loopHold > 0) return;
+    loopPausedForSpeech = false;
+    if (running && keepAlive && keepAlive.paused) { keepAlive.play().catch(() => {}); sev('background sound resumed'); }
+  }, 800);
+}
+function playLoop() { if (keepAlive && loopHold === 0 && !loopPausedForSpeech) keepAlive.play().catch(() => {}); }
 
 // Queue something to be said. Long text is split into sentences (iOS can cut off long utterances).
 function cleanSpeech(text) { return String(text || '').replace(/[*_#`>]/g, '').replace(/\s+/g, ' ').trim(); }
@@ -231,19 +256,19 @@ function speak(text) {
     const buf = geminiVoiceBuffer(text); // starts generating NOW, while anything earlier is still being spoken
     buf.catch(() => {});
     speechChain = speechChain.then(async () => {
-      speaking = true; setSub();
+      speaking = true; setSub(); holdLoop();
       try { await playBuffer(await buf); voiceFails = 0; if (/Gemini voice/.test(speechNote)) speechNote = ''; }
       catch (e) {
         voiceFails++; if (voiceFails >= 2) geminiVoiceDown = true;
+        sev('Gemini voice failed: ' + e.message);
         speechNote = 'Gemini voice failed (' + e.message + ') — used the iPhone voice instead';
         for (const ch of splitSpeech(text)) await speakDeviceNow(ch);
-      }
-      speaking = false; setSub();
+      } finally { speaking = false; setSub(); releaseLoop(); }
     });
     return speechChain;
   }
   const chunks = splitSpeech(text);
-  speechChain = speechChain.then(async () => { for (const ch of chunks) await speakDeviceNow(ch); });
+  speechChain = speechChain.then(async () => { holdLoop(); try { for (const ch of chunks) await speakDeviceNow(ch); } finally { releaseLoop(); } });
   return speechChain;
 }
 function splitSpeech(text) {
@@ -258,11 +283,9 @@ function splitSpeech(text) {
 function speakDeviceNow(text) {
   return new Promise((resolve) => {
     let done = false, started = false, tries = 0, cur = null, kick = null, errName = '';
-    if (S.pauseLoopForSpeech && keepAlive && !keepAlive.paused) { loopPausedForSpeech = true; keepAlive.pause(); }
-    const total = setTimeout(() => finish(), 7000 + text.length * 120 / (S.rate || 1));
+    const total = setTimeout(() => { sev('speech took too long — moving on'); finish(); }, 7000 + text.length * 120 / (S.rate || 1));
     const finish = () => {
       if (done) return; done = true; speaking = false; clearTimeout(total); clearTimeout(kick);
-      if (loopPausedForSpeech) { loopPausedForSpeech = false; if (running && keepAlive) keepAlive.play().catch(() => {}); }
       setSub(); resolve({ started, error: errName });
     };
     const say = () => {
@@ -273,13 +296,20 @@ function speakDeviceNow(text) {
       if (v) u.voice = v;
       u.lang = (v && v.lang) || 'en-US';
       u.rate = S.rate || 1; u.volume = 1;
-      u.onstart = () => { if (cur !== u) return; started = true; if (/not starting/.test(speechNote)) speechNote = ''; clearTimeout(kick); };
+      const short = '"' + text.slice(0, 24) + (text.length > 24 ? '…"' : '"');
+      u.onstart = () => { if (cur !== u) return; started = true; sev('voice started ' + short); if (/not starting/.test(speechNote)) speechNote = ''; clearTimeout(kick); };
+      u.onpause = () => sev('voice PAUSED by iOS ' + short);
+      u.onresume = () => sev('voice resumed ' + short);
       const end = () => { liveUtterances.delete(u); if (cur === u) finish(); };
-      u.onend = end; u.onerror = (e) => { if (cur === u) errName = (e && e.error) || 'error'; end(); };
+      u.onend = () => { sev('voice ended ' + short); end(); };
+      u.onerror = (e) => { if (cur === u) { errName = (e && e.error) || 'error'; sev('voice error ' + errName + ' ' + short); } end(); };
       try { if (speechSynthesis.paused) speechSynthesis.resume(); speechSynthesis.speak(u); } catch (e) { errName = e.message; finish(); return; }
       // iOS sometimes swallows speech without any error. If nothing starts, reset it and try once more.
       kick = setTimeout(() => {
         if (started || done) return;
+        // iOS sometimes skips the "started" event while it IS talking: never cut that off
+        if (speechSynthesis.speaking && !speechSynthesis.pending) { started = true; sev('no start event, but it is talking — leaving it alone'); return; }
+        sev('voice did not start — retrying');
         if (tries < 2) { try { speechSynthesis.cancel(); } catch {} cur = null; setTimeout(say, 200); }
         else { speechNote = 'Speech is not starting — run Speech & sounds → Audio check'; setSub(); }
       }, 2000);
@@ -322,8 +352,9 @@ function playBuffer(buf) {
   return new Promise((resolve) => {
     const c = audioCtx(), src = c.createBufferSource();
     src.buffer = buf; src.connect(c.destination);
-    const guard = setTimeout(resolve, buf.duration * 1000 + 1500);
-    src.onended = () => { clearTimeout(guard); resolve(); };
+    const guard = setTimeout(() => { sev('Gemini clip guard timeout'); resolve(); }, buf.duration * 1000 + 6000);
+    src.onended = () => { clearTimeout(guard); sev('Gemini clip ended'); resolve(); };
+    sev('Gemini clip playing (' + buf.duration.toFixed(1) + ' s)');
     src.start();
   });
 }
@@ -379,7 +410,11 @@ function setupMediaSession() {
   if (!keepAlive) {
     keepAlive = new Audio(silentWavUrl());
     keepAlive.loop = true;
-    keepAlive.addEventListener('pause', () => { if (running && !loopPausedForSpeech) setTimeout(() => { if (!loopPausedForSpeech) keepAlive.play().catch(() => {}); }, 300); });
+    keepAlive.addEventListener('pause', () => {
+      if (loopPausedForSpeech || loopHold > 0) return; // our own pause, or iOS paused it for the voice: leave it
+      sev('background sound paused by iOS');
+      if (running) setTimeout(playLoop, 300);
+    });
   }
   keepAlive.play().catch(() => {});
   const ms = navigator.mediaSession;
@@ -395,7 +430,7 @@ function earbud(press) {
   const now = Date.now();
   if (now - lastCmdAt < 400) return; // ignore bounces
   lastCmdAt = now;
-  if (keepAlive) keepAlive.play().catch(() => {});
+  playLoop();
   try { navigator.mediaSession.playbackState = 'playing'; } catch {}
   const action = { single: S.btnSingle, double: S.btnDouble, triple: S.btnTriple }[press];
   doAction(action, 'earbud-' + press);
@@ -1012,7 +1047,8 @@ async function runAudioCheck() {
   banner('2 of 5 — iPhone voice'); let r = await speakDeviceNow('Two. iPhone voice.'); log('2. iPhone voice — ' + desc(r)); await sleep(400);
   banner('3 of 5 — iPhone voice, background sound paused');
   if (keepAlive && !keepAlive.paused) { loopPausedForSpeech = true; keepAlive.pause(); }
-  r = await speakDeviceNow('Three. iPhone voice, background sound paused.'); log('3. iPhone voice, background paused — ' + desc(r)); await sleep(400);
+  r = await speakDeviceNow('Three. iPhone voice, background sound paused.'); log('3. iPhone voice, background paused — ' + desc(r));
+  loopPausedForSpeech = false; playLoop(); await sleep(400);
   banner('4 of 5 — iPhone voice, normal audio mode');
   const hadSession = !!navigator.audioSession;
   try { if (hadSession) navigator.audioSession.type = 'auto'; } catch {}
@@ -1035,9 +1071,9 @@ $('btnAudioCheck').onclick = () => { runAudioCheck().catch((e) => { $('acBanner'
 $('acApply').onclick = () => {
   const h = (i) => $('acH' + i).checked;
   let msg;
-  if (h(2)) { S.voiceEngine = 'device'; S.pauseLoopForSpeech = false; S.audioSessionMode = 'playback'; msg = 'Set: iPhone voice.'; }
+  if (h(2)) { S.voiceEngine = 'device'; S.pauseLoopForSpeech = true; S.audioSessionMode = 'playback'; msg = 'Set: iPhone voice.'; }
   else if (h(3)) { S.voiceEngine = 'device'; S.pauseLoopForSpeech = true; S.audioSessionMode = 'playback'; msg = 'Set: iPhone voice, with the background sound paused while it speaks.'; }
-  else if (h(4)) { S.voiceEngine = 'device'; S.pauseLoopForSpeech = false; S.audioSessionMode = 'auto'; msg = 'Set: iPhone voice with the normal audio mode. (Beeps may now follow the silent switch.)'; }
+  else if (h(4)) { S.voiceEngine = 'device'; S.pauseLoopForSpeech = true; S.audioSessionMode = 'auto'; msg = 'Set: iPhone voice with the normal audio mode. (Beeps may now follow the silent switch.)'; }
   else if (h(5)) { S.voiceEngine = 'gemini'; msg = 'Set: Gemini voice. It starts about a second later than the iPhone voice; the stall line is prepared in advance.'; }
   else msg = 'Nothing worked yet. Check: the silent switch on the left side of the phone (orange = silent), the volume while something plays, and Control Center → the audio-output icon is set to your earbuds. Then run the check again.';
   if (!h(1)) msg += ' You also did not hear the beep — check the volume and that the earbuds are the audio output.';
@@ -1047,8 +1083,13 @@ $('acApply').onclick = () => {
   $('acMsg').textContent = msg;
 };
 $('acCopy').onclick = async () => {
-  try { await navigator.clipboard.writeText(acReport); $('acMsg').textContent = 'Copied — paste it into the chat.'; }
+  try { await navigator.clipboard.writeText(acReport + '\n--- recent sound events ---\n' + sevents.join('\n')); $('acMsg').textContent = 'Copied — paste it into the chat.'; }
   catch { $('acMsg').textContent = 'Could not copy automatically — long-press the report above to select it.'; }
+};
+$('btnCopyEvents').onclick = async () => {
+  const txt = 'App ' + APP_VERSION + ' · voice: ' + S.voiceEngine + ' · pause background: ' + S.pauseLoopForSpeech + '\n' + sevents.join('\n');
+  try { await navigator.clipboard.writeText(txt); $('speechInfo').textContent = 'Sound log copied — paste it into the chat.'; }
+  catch { $('speechInfo').textContent = txt; }
 };
 $('btnPromptReset').onclick = () => { S.prompt = DEFAULT_PROMPT; saveSettings(); document.querySelector('[data-k=prompt]').value = S.prompt; syncPreset(); };
 $('btnResetAll').onclick = () => {
@@ -1183,7 +1224,7 @@ setInterval(padPoll, 60);
 document.addEventListener('visibilitychange', async () => {
   if (document.hidden || !running) return;
   if (!wakeLock) requestWakeLock();
-  if (keepAlive) keepAlive.play().catch(() => {});
+  playLoop();
   setAudioSession();
   setTimeout(() => restartCamera('returned to app'), 600); // iOS usually freezes the camera while the app is away
 });

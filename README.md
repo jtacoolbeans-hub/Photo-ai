@@ -172,6 +172,13 @@ the iPhone voice is silent. It is about 1–2 s slower to start, so it is a fall
 moment the answer arrives, makes several answers at once, and prepares the stall line in advance.
 **It needs the updated Worker**: paste the new `worker/proxy.js` into Cloudflare once more (Step 3, steps 3–5).
 
+### Voice fading out?
+
+The app now pauses its inaudible background sound (used for the earbud buttons) while anything is being
+said, never restarts it mid-sentence, skips beeps that would land on top of the voice, and never cancels
+speech that is actually playing. If the voice still drops out, go to **Speech & sounds → Copy sound log**
+right after it happens and paste it to Claude: it lists every start, pause and stop with timestamps.
+
 ### Pages with several questions
 
 The app answers **every** question or item on the card, in order: "Number 1 … Number 2 …". The last-answer
