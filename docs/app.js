@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 const MIN_WORKER_VERSION = 2;
 
 // The first version of the prompt. Phones that saved it get the new one automatically.
@@ -78,7 +78,7 @@ const DEFAULTS = {
   models: 'gemini-3.5-flash, gemini-flash-latest',
   mediaResolution: 'MEDIA_RESOLUTION_HIGH', thinking: 'minimal', maxTokens: 2048,
   prompt: DEFAULT_PROMPT, style: '', allItems: true,
-  voiceEngine: 'device', ttsVoice: 'Kore', ttsModel: 'gemini-2.5-flash-preview-tts', pauseLoopForSpeech: true, audioSessionMode: 'playback',
+  voiceEngine: 'device', ttsVoice: 'Kore', ttsModel: 'gemini-2.5-flash-preview-tts', pauseLoopForSpeech: true, audioSessionMode: 'playback', freezeMode: 'speech',
   maxSide: 2048, jpegQuality: 85,
   timeoutSec: 8, stallLine: 'Great question. Give me just a second with that one.',
   lateAnswer: true, lateSec: 15, retryNone: 1,
@@ -183,7 +183,11 @@ const TONES = {
 function audioCtx() {
   if (!actx) {
     actx = new (window.AudioContext || window.webkitAudioContext)();
-    actx.onstatechange = () => { sev('Web Audio ' + actx.state); if (running && actx.state !== 'running' && actx.state !== 'closed') actx.resume().catch(() => {}); };
+    actx.onstatechange = () => {
+      sev('Web Audio ' + actx.state);
+      // Only wake it when nothing is being said: on iOS, waking Web Audio mid-sentence silently kills the iPhone voice.
+      if (running && !audioQuiet && !speaking && loopHold === 0 && actx.state !== 'running' && actx.state !== 'closed') actx.resume().catch(() => {});
+    };
   }
   if (actx.state !== 'running') actx.resume().catch(() => {});
   return actx;
@@ -225,7 +229,10 @@ function beepNow(name) {
 // ---------------------------------------------------------------- speech
 let speaking = false, speechChain = Promise.resolve(), speechNote = '';
 const liveUtterances = new Set(); // keep references: Safari can drop an utterance that gets garbage-collected mid-speech
-let loopPausedForSpeech = false, loopHold = 0, loopResumeTimer = null;
+let loopPausedForSpeech = false, loopHold = 0, loopResumeTimer = null, audioQuiet = false;
+// Put Web Audio (the beeps) to sleep before the iPhone voice talks, and wake it only after speech is over.
+function quietWebAudio() { if (actx && actx.state === 'running') { audioQuiet = true; actx.suspend().catch(() => {}); sev('beeps paused for the voice'); } else if (actx) audioQuiet = true; }
+function wakeAudio() { audioQuiet = false; if (actx && actx.state !== 'running' && actx.state !== 'closed') return actx.resume().catch(() => {}); return Promise.resolve(); }
 // Recent sound events, for "Copy sound log" — shows exactly what interrupted the voice.
 const sevents = [];
 function sev(t) { sevents.push(new Date().toTimeString().slice(0, 8) + '.' + String(Date.now() % 1000).padStart(3, '0') + '  ' + t); if (sevents.length > 120) sevents.shift(); }
@@ -242,6 +249,7 @@ function releaseLoop() {
   loopResumeTimer = setTimeout(() => {
     if (loopHold > 0) return;
     loopPausedForSpeech = false;
+    wakeAudio();
     if (running && keepAlive && keepAlive.paused) { keepAlive.play().catch(() => {}); sev('background sound resumed'); }
   }, 800);
 }
@@ -257,7 +265,7 @@ function speak(text) {
     buf.catch(() => {});
     speechChain = speechChain.then(async () => {
       speaking = true; setSub(); holdLoop();
-      try { await playBuffer(await buf); voiceFails = 0; if (/Gemini voice/.test(speechNote)) speechNote = ''; }
+      try { const ab = await buf; await wakeAudio(); await playBuffer(ab); voiceFails = 0; if (/Gemini voice/.test(speechNote)) speechNote = ''; }
       catch (e) {
         voiceFails++; if (voiceFails >= 2) geminiVoiceDown = true;
         sev('Gemini voice failed: ' + e.message);
@@ -282,10 +290,20 @@ function splitSpeech(text) {
 // The iPhone's own voice (speechSynthesis). Resolves with what happened, for the audio check.
 function speakDeviceNow(text) {
   return new Promise((resolve) => {
-    let done = false, started = false, tries = 0, cur = null, kick = null, errName = '';
-    const total = setTimeout(() => { sev('speech took too long — moving on'); finish(); }, 7000 + text.length * 120 / (S.rate || 1));
+    let done = false, started = false, tries = 0, cur = null, kick = null, poll = null, errName = '';
+    quietWebAudio();
+    // Generous time limit from the word count (≈140 words a minute, plus margin). If iOS gets stuck, we STOP it
+    // (so the next sentence isn't queued behind a stuck one) and move on.
+    const words = text.split(/\s+/).length;
+    const limit = Math.max(6000, 2500 + words / 2.3 * 1000 / (S.rate || 1) * 1.6);
+    const total = setTimeout(() => {
+      sev(started ? 'voice stuck — stopping it' : 'voice never started — giving up on this line');
+      if (!started) { speechNote = 'Speech is not starting — run Speech & sounds → Audio check'; }
+      try { speechSynthesis.cancel(); } catch {}
+      finish();
+    }, limit);
     const finish = () => {
-      if (done) return; done = true; speaking = false; clearTimeout(total); clearTimeout(kick);
+      if (done) return; done = true; speaking = false; clearTimeout(total); clearTimeout(kick); clearInterval(poll);
       setSub(); resolve({ started, error: errName });
     };
     const say = () => {
@@ -304,7 +322,12 @@ function speakDeviceNow(text) {
       u.onend = () => { sev('voice ended ' + short); end(); };
       u.onerror = (e) => { if (cur === u) { errName = (e && e.error) || 'error'; sev('voice error ' + errName + ' ' + short); } end(); };
       try { if (speechSynthesis.paused) speechSynthesis.resume(); speechSynthesis.speak(u); } catch (e) { errName = e.message; finish(); return; }
-      // iOS sometimes swallows speech without any error. If nothing starts, reset it and try once more.
+      // iOS doesn't always send "ended": once it has started, notice for ourselves when it stops talking.
+      clearInterval(poll);
+      poll = setInterval(() => {
+        if (done || cur !== u || !started) return;
+        if (!speechSynthesis.speaking && !speechSynthesis.pending) { sev('voice finished ' + short + ' (no end event)'); liveUtterances.delete(u); finish(); }
+      }, 300);
       kick = setTimeout(() => {
         if (started || done) return;
         // iOS sometimes skips the "started" event while it IS talking: never cut that off
@@ -312,9 +335,12 @@ function speakDeviceNow(text) {
         sev('voice did not start — retrying');
         if (tries < 2) { try { speechSynthesis.cancel(); } catch {} cur = null; setTimeout(say, 200); }
         else { speechNote = 'Speech is not starting — run Speech & sounds → Audio check'; setSub(); }
-      }, 2000);
+      }, 3000);
     };
-    speaking = true; setSub(); say();
+    speaking = true; setSub();
+    // Anything still "talking" now is a leftover (we say one thing at a time): clear it so we don't queue behind it.
+    if (speechSynthesis.speaking || speechSynthesis.pending) { sev('cleared leftover speech'); try { speechSynthesis.cancel(); } catch {} setTimeout(say, 150); }
+    else say();
   });
 }
 
@@ -726,6 +752,7 @@ function loop() {
 
 function tick() {
   if (!video.videoWidth || document.hidden || restarting || camBusy) return;
+  if (frozen) return; // picture frozen after a capture: no checking, nothing can trip a new read
   // Never act on a stale picture (a frozen feed would just be read again and again):
   if (hasRVFC && !document.body.classList.contains('showmode') && performance.now() - lastFrameAt > 2500) return;
   const r = cropRect();
@@ -782,7 +809,30 @@ async function handleCapture(c) {
   }
 }
 
+// After a capture the picture freezes (shows the photo that was sent) and checking stops, until the answer
+// arrives or has been spoken. When it unfreezes, the next picture is compared with the one from BEFORE the
+// freeze: same card -> nothing happens; a new card -> it is read.
+let frozen = false;
+function freezeView() {
+  if (S.freezeMode === 'off' || !video.videoWidth) return;
+  try {
+    const c = document.createElement('canvas'), w = 480;
+    c.width = w; c.height = Math.round(w * video.videoHeight / video.videoWidth);
+    c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
+    $('frozenShot').src = c.toDataURL('image/jpeg', 0.7);
+  } catch {}
+  $('frozenShot').hidden = false; $('frozenTag').hidden = false;
+  $('frozenTag').textContent = S.freezeMode === 'answer' ? '❄ Frozen until the answer arrives' : '❄ Frozen until the answer is spoken';
+  frozen = true;
+}
+function unfreezeView() {
+  if (!frozen) return;
+  frozen = false; $('frozenShot').hidden = true; $('frozenTag').hidden = true;
+  stillCount = 0;
+}
+
 async function runCapture(c) {
+  freezeView();
   setState('captured');
   movedWhileBusy = false;
   tone('captured');
@@ -810,6 +860,7 @@ async function runCapture(c) {
   }, (+S.timeoutSec || 8) * 1000);
 
   const res = await pending;
+  if (S.freezeMode === 'answer') unfreezeView();
   clearTimeout(stallTimer); clearInterval(ticker);
   entry.latencyMs = Math.round(performance.now() - t0);
   entry.geminiMs = res.geminiMs; entry.model = res.model || ''; entry.attempts = res.attempts;
@@ -843,8 +894,10 @@ async function runCapture(c) {
 }
 
 function finish(waitForChange, retry = false) {
+  const wasFrozen = frozen;
+  unfreezeView();
   if (!retry) noneRetries = 0;
-  needChange = waitForChange && !movedWhileBusy;
+  needChange = waitForChange && (wasFrozen || !movedWhileBusy); // while frozen we did not watch; the next picture decides
   movedWhileBusy = false;
   nextAutoAt = Date.now() + (retry ? 500 : (+S.cooldownSec || 0) * 1000);
   stillCount = 0;
@@ -1043,6 +1096,8 @@ async function runAudioCheck() {
   log('Audio mode: ' + (navigator.audioSession ? navigator.audioSession.type : 'not supported') + ' · Web Audio: ' + actx.state +
       ' · voices: ' + speechSynthesis.getVoices().length + ' · background sound: ' + (keepAlive && !keepAlive.paused ? 'playing' : 'off') +
       ' · camera: ' + (track && track.readyState === 'live' ? 'on' : 'off'));
+  try { speechSynthesis.cancel(); } catch {}
+  await wakeAudio();
   banner('1 of 5 — beep'); await beepNow('answer'); await sleep(600); log('1. Beep — played (Web Audio ' + actx.state + ')');
   banner('2 of 5 — iPhone voice'); let r = await speakDeviceNow('Two. iPhone voice.'); log('2. iPhone voice — ' + desc(r)); await sleep(400);
   banner('3 of 5 — iPhone voice, background sound paused');
@@ -1055,6 +1110,7 @@ async function runAudioCheck() {
   r = await speakDeviceNow('Four. iPhone voice, normal audio mode.');
   log('4. iPhone voice, normal audio mode — ' + desc(r) + (hadSession ? '' : ' (audio mode not supported: same as 2)'));
   setAudioSession(); await sleep(400);
+  await wakeAudio();
   banner('5 of 5 — Gemini voice (needs the updated Worker)');
   try {
     const t0 = performance.now();

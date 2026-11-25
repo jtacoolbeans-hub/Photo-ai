@@ -94,6 +94,10 @@
   table.keys td { padding:6px 4px; border-top:1px solid var(--line); vertical-align:top; } table.keys td:first-child { white-space:nowrap; }
   kbd { background:#000; border:1px solid var(--line); border-radius:5px; padding:1px 6px; font:12px ui-monospace, Menlo, monospace; }
   [hidden] { display:none !important; }
+  #frozenShot { position:absolute; inset:0; width:100%; height:100%; z-index:1; }
+  #cropBox { z-index:2; }
+  #frozenTag { position:absolute; top:8px; left:50%; transform:translateX(-50%); z-index:3; background:rgba(0,40,80,.85);
+               color:#cfe6ff; border-radius:8px; padding:5px 10px; font-size:13px; font-weight:600; white-space:nowrap; }
   button.pri { background:var(--acc); color:#000; }
   .acbox { background:#000; border-radius:12px; padding:10px; margin-top:10px; }
   .acbanner { font-size:18px; font-weight:700; color:var(--warn); margin-top:8px; min-height:22px; }
@@ -128,6 +132,8 @@
 <section id="live">
   <div id="stage">
     <video id="video" playsinline muted autoplay></video>
+    <img id="frozenShot" hidden alt="">
+    <div id="frozenTag" hidden></div>
     <div id="placeholder">Camera view appears here after you tap START</div>
     <div id="cropBox"></div>
     <div id="drawHint">Drag on the picture to draw the crop box</div>
@@ -348,6 +354,13 @@
 <details>
   <summary>Detection (stillness &amp; sharpness)</summary>
   <div class="hint">Watch the meters above while you place and hold a card to pick these numbers.</div>
+  <label>After a capture, freeze the picture</label>
+  <select data-k="freezeMode">
+    <option value="speech">Until the answer has been spoken (default)</option>
+    <option value="answer">Until the answer arrives</option>
+    <option value="off">Don't freeze</option>
+  </select>
+  <div class="hint">While frozen, nothing you do in front of the camera can trigger another read. Afterwards a new card is read; the same card is not read again.</div>
   <label>Capture speed — how soon a card is read once it is placed</label>
   <select id="speedPreset">
     <option value="fastest">Fastest — first sharp frame as soon as it is still</option>

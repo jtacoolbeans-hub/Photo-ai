@@ -179,6 +179,13 @@ said, never restarts it mid-sentence, skips beeps that would land on top of the 
 speech that is actually playing. If the voice still drops out, go to **Speech & sounds → Copy sound log**
 right after it happens and paste it to Claude: it lists every start, pause and stop with timestamps.
 
+### Freeze after capture
+
+**Detection → After a capture, freeze the picture.** After a photo is taken, the screen shows that photo with a
+❄ label and checking stops, so nothing in front of the camera can trigger another read. By default it stays
+frozen until the answer has been spoken (or choose "until the answer arrives", or off). When it unfreezes, the
+same card is not read again; a new card is.
+
 ### Pages with several questions
 
 The app answers **every** question or item on the card, in order: "Number 1 … Number 2 …". The last-answer
