@@ -28,18 +28,21 @@
  *     so the phone can start playing almost at once. Falls back to a whole WAV file.
  *     -> an audio/wav file of Gemini reading the words (the app plays it like music,
  *        which works even when the iPhone's silent switch is on).
- *   GEMINI_TTS_MODEL (Text, optional) default voice model, e.g. gemini-2.5-flash-preview-tts
+ *   GEMINI_TTS_MODEL (Text, optional) default voice model(s), comma-separated: each model has its own free quota,
+ *     and when one is used up the next is tried
+ *   POST / with { tts: "words", engine: "dg", dgVoice?: "aura-2-thalia-en" } -> Deepgram voice (streamed raw audio).
+ *     Needs a secret named DEEPGRAM_API_KEY. New Deepgram accounts get free credit with no card.
  *   POST / with { tts: "words", engine: "cf" } -> Cloudflare Workers AI voice instead of Gemini.
  *     Needs a Workers AI binding (Worker -> Settings -> Bindings -> Add -> Workers AI). Any name works.
  *     cfModel may be one model or a comma-separated list; retired/missing models are skipped automatically.
  */
 
-const WORKER_VERSION = 7;
+const WORKER_VERSION = 8;
 const DEFAULT_MODEL = 'gemini-flash-latest';
 const DEFAULT_TTS_MODEL = 'gemini-2.5-flash-preview-tts';
 // Cloudflare Workers AI voices, best first. Models get retired from time to time, so we try them in turn,
 // skip any that are gone, and remember which ones work.
-const CF_TTS_MODELS = ['@cf/deepgram/aura-2-en', '@cf/deepgram/aura-1', '@cf/myshell-ai/melotts'];
+const CF_TTS_MODELS = ['@cf/deepgram/aura-1', '@cf/deepgram/aura-2-en', '@cf/myshell-ai/melotts']; // cheapest first: the free allowance is only 10,000 units a day
 const MAX_BODY_BYTES = 15 * 1024 * 1024; // ~15 MB of JSON (base64 photo)
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/';
 
@@ -81,6 +84,7 @@ export default {
         defaultModel: env.GEMINI_MODEL || DEFAULT_MODEL,
         tts: true,
         ai: !!getAI(env),
+        dg: !!env.DEEPGRAM_API_KEY,
       });
     }
 
@@ -100,7 +104,11 @@ export default {
       return json({ error: 'Body must be JSON' }, 400);
     }
 
-    if (typeof body.tts === 'string') return body.engine === 'cf' ? handleCfTts(env, body, cors, json) : handleTts(env, body, cors, json, ctx);
+    if (typeof body.tts === 'string') {
+      if (body.engine === 'cf') return handleCfTts(env, body, cors, json);
+      if (body.engine === 'dg') return handleDgTts(env, body, cors, json);
+      return handleTts(env, body, cors, json, ctx);
+    }
 
     let image = String(body.image || '');
     let mimeType = String(body.mimeType || 'image/jpeg');
@@ -235,21 +243,32 @@ async function handleCfTts(env, body, cors, json) {
   return json({ error: 'Cloudflare voice: no model worked — ' + errs.join(' | ') }, 502);
 }
 
-// Text -> speech with Gemini, returned as a WAV file.
+// Text -> speech with Gemini, returned as a WAV file. "model" may be a comma-separated list: each Gemini model has its
+// own free quota, so when one is used up (or doesn't exist) the next is tried.
 async function handleTts(env, body, cors, json, ctx) {
   const text = String(body.tts).trim().slice(0, 3000);
   if (!text) return json({ error: 'No text to speak' }, 400);
-  const model = String(body.model || env.GEMINI_TTS_MODEL || DEFAULT_TTS_MODEL);
-  if (!/^[a-z0-9][a-z0-9.\-]{1,63}$/i.test(model)) return json({ error: 'Bad voice model name' }, 400);
+  const models = String(body.model || env.GEMINI_TTS_MODEL || DEFAULT_TTS_MODEL).split(',').map((m) => m.trim()).filter(Boolean).slice(0, 4);
+  for (const m of models) if (!/^[a-z0-9][a-z0-9.\-]{1,63}$/i.test(m)) return json({ error: 'Bad voice model name' }, 400);
   const voice = /^[A-Za-z]{2,24}$/.test(String(body.voice || '')) ? String(body.voice) : 'Kore';
   const payload = {
     contents: [{ role: 'user', parts: [{ text }] }],
     generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } } },
   };
-  if (body.stream) {
-    const streamed = await ttsStream(env, model, payload, cors, ctx);
-    if (streamed) return streamed; // otherwise fall through to a whole file
+  const errs = []; let last = null;
+  for (const model of models) {
+    if (body.stream) {
+      const streamed = await ttsStream(env, model, payload, cors, ctx);
+      if (streamed) return streamed; // otherwise fall through to a whole file
+    }
+    const r = await ttsFile(env, model, payload, cors);
+    if (r.ok) return r.response;
+    errs.push(model + ': ' + r.error); last = r;
+    if (!(r.status === 429 || r.status === 404 || /quota|exceeded|not found|RESOURCE_EXHAUSTED/i.test(r.error))) break; // only quota / missing models are worth another model
   }
+  return json({ error: models.length > 1 ? errs.join(' | ') : last.error }, last && last.status === 504 ? 504 : 502);
+}
+async function ttsFile(env, model, payload, cors) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 25000);
   const t0 = Date.now();
@@ -262,18 +281,42 @@ async function handleTts(env, body, cors, json, ctx) {
     });
     data = await res.json().catch(() => ({}));
   } catch (e) {
-    return json({ error: e && e.name === 'AbortError' ? 'Gemini voice timed out' : 'Could not reach Gemini' }, 504);
+    return { ok: false, status: 504, error: e && e.name === 'AbortError' ? 'Gemini voice timed out' : 'Could not reach Gemini' };
   } finally { clearTimeout(timer); }
-  if (!res.ok) return json({ error: (data && data.error && data.error.message) || ('Gemini HTTP ' + res.status) }, 502);
+  if (!res.ok) return { ok: false, status: res.status, error: (data && data.error && data.error.message) || ('Gemini HTTP ' + res.status) };
   const parts = (((data.candidates || [])[0] || {}).content || {}).parts || [];
   const part = parts.find((p) => p.inlineData || p.inline_data);
   const inl = part && (part.inlineData || part.inline_data);
-  if (!inl || !inl.data) return json({ error: 'Gemini returned no audio' }, 502);
+  if (!inl || !inl.data) return { ok: false, status: 502, error: 'Gemini returned no audio' };
   const mime = String(inl.mimeType || inl.mime_type || '');
   const bytes = b64ToBytes(inl.data);
   const rate = +((/rate=(\d+)/.exec(mime) || [])[1] || 24000);
   const wav = /wav/i.test(mime) ? bytes : pcmToWav(bytes, rate);
-  return new Response(wav, { headers: { ...cors, 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store', 'X-Tts-Mode': 'file', 'X-Gemini-Ms': String(Date.now() - t0) } });
+  return { ok: true, response: new Response(wav, { headers: { ...cors, 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store', 'X-Tts-Mode': 'file', 'X-Cf-Model': model, 'X-Gemini-Ms': String(Date.now() - t0) } }) };
+}
+// Deepgram voice (Aura): very fast, streamed as raw 16-bit audio. New Deepgram accounts come with free credit.
+async function handleDgTts(env, body, cors, json) {
+  if (!env.DEEPGRAM_API_KEY) return json({ error: 'Deepgram voice is not set up: add a secret named DEEPGRAM_API_KEY to this Worker' }, 501);
+  const text = String(body.tts).trim().slice(0, 2000);
+  if (!text) return json({ error: 'No text to speak' }, 400);
+  const model = /^aura(-2)?-[a-z0-9\-]{2,30}$/i.test(String(body.dgVoice || '')) ? String(body.dgVoice) : 'aura-2-thalia-en';
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  let res;
+  try {
+    res = await fetch('https://api.deepgram.com/v1/speak?model=' + encodeURIComponent(model) + '&encoding=linear16&container=none&sample_rate=24000', {
+      method: 'POST',
+      headers: { 'Authorization': 'Token ' + env.DEEPGRAM_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }), signal: ctrl.signal,
+    });
+  } catch (e) { clearTimeout(timer); return json({ error: e && e.name === 'AbortError' ? 'Deepgram timed out' : 'Could not reach Deepgram' }, 504); }
+  clearTimeout(timer); // we have the headers; the audio then streams straight through
+  if (!res.ok || !res.body) {
+    let msg = ''; try { msg = await res.text(); } catch {}
+    try { const j = JSON.parse(msg); msg = j.err_msg || j.error || j.message || msg; } catch {}
+    return json({ error: 'Deepgram voice failed (HTTP ' + res.status + '): ' + String(msg || res.statusText).slice(0, 200) }, 502);
+  }
+  return new Response(res.body, { headers: { ...cors, 'Content-Type': 'audio/L16;rate=24000', 'Cache-Control': 'no-store', 'X-Tts-Mode': 'stream', 'X-Cf-Model': model } });
 }
 // Streaming voice: ask Gemini for its "server-sent events" stream and pass each audio piece straight on.
 // Returns null (so the caller makes a whole file instead) if streaming isn't available or gives no audio.

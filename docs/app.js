@@ -14,9 +14,9 @@
  */
 'use strict';
 
-const APP_VERSION = '1.11.0';
+const APP_VERSION = '1.13.0';
 const MIN_WORKER_VERSION = 5;
-const RECOMMENDED_WORKER_VERSION = 7; // 7 = tries several Cloudflare voice models, skips retired ones
+const RECOMMENDED_WORKER_VERSION = 8; // 8 = Deepgram voice, Gemini model list, cheapest Cloudflare voice first
 
 // The first version of the prompt. Phones that saved it get the new one automatically.
 const OLD_PROMPT_V1 =
@@ -96,7 +96,8 @@ const DEFAULTS = {
   models: 'gemini-3.5-flash, gemini-flash-latest',
   mediaResolution: 'MEDIA_RESOLUTION_HIGH', thinking: 'minimal', maxTokens: 2048,
   prompt: DEFAULT_PROMPT, style: '', allItems: true,
-  voiceEngine: 'cf', cfModel: '@cf/deepgram/aura-2-en', cfVoice: 'luna', ttsVoice: 'Kore', ttsModel: 'gemini-2.5-flash-preview-tts', pauseLoopForSpeech: true, audioSessionMode: 'playback', freezeMode: 'speech',
+  voiceEngine: 'auto', dgVoice: 'aura-2-thalia-en', cfModel: '@cf/deepgram/aura-1', cfVoice: 'luna', ttsVoice: 'Kore', ttsModel: 'gemini-2.5-flash-preview-tts, gemini-2.5-pro-preview-tts',
+  maxVoiceChars: 500, deviceFallback: true, cacheClips: true, deviceMode: 1, pauseLoopForSpeech: true, audioSessionMode: 'playback', freezeMode: 'speech',
   maxSide: 2048, jpegQuality: 85,
   timeoutSec: 8, stallLine: 'Great question. Give me just a second with that one.',
   lateAnswer: true, lateSec: 15, retryNone: 1,
@@ -112,7 +113,7 @@ for (const k of CUE_KEYS) DEFAULTS['cue_' + k] = 'tone';
 
 // ---------------------------------------------------------------- settings
 const LS_KEY = 'cardAssistant.settings.v1';
-const SETTINGS_VER = 10;
+const SETTINGS_VER = 11;
 let S = loadSettings();
 function loadSettings() {
   let saved = {};
@@ -126,6 +127,10 @@ function loadSettings() {
     }
     if ([OLD_PROMPT_V1, OLD_QUESTION_V2, OLD_ANYTHING_V3, OLD_ANYTHING_V4, OLD_QUESTION_V4].includes(saved.prompt)) delete saved.prompt;
     if ((saved.v || 1) < 4 && saved.maxTokens === 1024) delete saved.maxTokens; // longer pages need room for many answers
+    if ((saved.v || 1) < 11) { // the free Cloudflare allowance is small: use the cheaper model, and 'auto' picks the best voice you have
+      if (saved.voiceEngine === 'cf' || saved.voiceEngine === 'gemini') delete saved.voiceEngine;
+      if (saved.cfModel === '@cf/deepgram/aura-2-en') delete saved.cfModel;
+    }
     if ((saved.v || 1) < 10 && saved.sharpMin === 60) delete saved.sharpMin; // now a 'focus target', not a gate: pages with little text must still count
     if ((saved.v || 1) < 8) { // Cloudflare retired MeloTTS: move to Aura, whose speaker names differ
       if (!saved.cfModel || /melotts/i.test(saved.cfModel)) delete saved.cfModel;
@@ -162,7 +167,7 @@ function onSettingChanged(k) {
   if (k === 'camId' || k === 'res' || k === 'camFps') { safeMode = false; if (running) startCamera().catch((e) => { camNote = 'Camera error: ' + e.message; setSub(); }); }
   if (k === 'torch') applyTorch();
   if (k === 'useCrop') drawCropBox();
-  if (['stallLine', 'voiceEngine', 'ttsVoice', 'ttsModel', 'cfModel', 'cfVoice', 'workerUrl', 'token'].includes(k)) { engineDown.cf = ''; engineDown.gemini = ''; engineBackoff.cf = engineBackoff.gemini = 0; checkWorker().then(prewarmVoice); }
+  if (['stallLine', 'voiceEngine', 'ttsVoice', 'ttsModel', 'cfModel', 'cfVoice', 'dgVoice', 'workerUrl', 'token'].includes(k)) { resetEngines(); checkWorker().then(prewarmVoice); }
   if (k === 'audioSessionMode') setAudioSession();
 }
 
@@ -264,9 +269,21 @@ const sevents = [];
 function sev(t) { sevents.push(new Date().toTimeString().slice(0, 8) + '.' + String(Date.now() % 1000).padStart(3, '0') + '  ' + t); if (sevents.length > 120) sevents.shift(); }
 // While anything is being said, the background loop is held: paused (by default) and NEVER restarted, so it
 // can't cut into the voice. It resumes 0.8 s after the last thing is said (not between sentences or items).
-function holdLoop() {
+// How the iPhone voice is played. iOS decides whether speech is audible (e.g. with the silent switch on) from what else the page is
+// doing with sound, so there are several set-ups; the "iPhone voice lab" finds the one that is audible on this phone.
+const LAB_VARIANTS = [
+  { id: 1, loop: 'play',  wa: 'run',   session: 'playback',       label: 'background sound ON, beeps ON' },
+  { id: 2, loop: 'play',  wa: 'quiet', session: 'playback',       label: 'background sound ON, beeps asleep' },
+  { id: 3, loop: 'pause', wa: 'run',   session: 'playback',       label: 'background sound OFF, beeps ON' },
+  { id: 4, loop: 'pause', wa: 'quiet', session: 'playback',       label: 'background sound OFF, beeps asleep' },
+  { id: 5, loop: 'play',  wa: 'run',   session: 'transient-solo', label: 'background sound ON, "speech-prompt" audio mode' },
+  { id: 6, loop: 'play',  wa: 'run',   session: 'auto',           label: 'normal audio mode (follows the silent switch)' },
+];
+function deviceMode() { return LAB_VARIANTS.find((v) => v.id === +S.deviceMode) || LAB_VARIANTS[0]; }
+function holdLoop(forDevice) {
   loopHold++; clearTimeout(loopResumeTimer);
-  if (S.pauseLoopForSpeech && keepAlive && !keepAlive.paused) { loopPausedForSpeech = true; keepAlive.pause(); sev('background sound paused for speech'); }
+  const pauseIt = forDevice ? deviceMode().loop === 'pause' : S.pauseLoopForSpeech;
+  if (pauseIt && keepAlive && !keepAlive.paused) { loopPausedForSpeech = true; keepAlive.pause(); sev('background sound paused for speech'); }
 }
 function releaseLoop() {
   loopHold = Math.max(0, loopHold - 1);
@@ -292,7 +309,7 @@ function speak(text) {
     // as soon as it is ready while the rest are still being made. Gemini voice: one at a time (3 a minute free).
     const pieces = voiceChunks(text);
     const first = voiceOrder()[0];
-    const jobs = first === 'cf' ? pieces.map((c) => voiceJob(c, { engine: 'cf' })) : [];
+    const jobs = isParallel(first) ? pieces.map((c) => voiceJob(c, { engine: first })) : [];
     speechChain = speechChain.then(async () => {
       speaking = true; setSub();
       try { for (let i = 0; i < pieces.length; i++) await playVoice(pieces[i], jobs[i], i < pieces.length - 1); }
@@ -301,7 +318,7 @@ function speak(text) {
     return speechChain;
   }
   const chunks = splitSpeech(text);
-  speechChain = speechChain.then(async () => { holdLoop(); try { for (const ch of chunks) await speakDeviceNow(ch); } finally { releaseLoop(); } });
+  speechChain = speechChain.then(async () => { holdLoop(true); try { for (const ch of chunks) await speakDeviceNow(ch); } finally { releaseLoop(); } });
   return speechChain;
 }
 // Cut text into pieces at sentence ends: a short first piece (so sound starts quickly), longer ones after.
@@ -339,7 +356,10 @@ function splitSpeech(text) {
 function speakDeviceNow(text) {
   return new Promise((resolve) => {
     let done = false, started = false, tries = 0, cur = null, kick = null, poll = null, errName = '';
-    quietWebAudio();
+    const dm = deviceMode();
+    try { if (navigator.audioSession) navigator.audioSession.type = dm.session; } catch {}
+    if (dm.loop === 'play' && keepAlive && keepAlive.paused && running) keepAlive.play().catch(() => {});
+    if (dm.wa === 'quiet') quietWebAudio(); else { audioQuiet = false; if (actx && actx.state !== 'running') actx.resume().catch(() => {}); }
     // Generous time limit from the word count (≈140 words a minute, plus margin). If iOS gets stuck, we STOP it
     // (so the next sentence isn't queued behind a stuck one) and move on.
     const words = text.split(/\s+/).length;
@@ -352,6 +372,7 @@ function speakDeviceNow(text) {
     }, limit);
     const finish = () => {
       if (done) return; done = true; speaking = false; clearTimeout(total); clearTimeout(kick); clearInterval(poll);
+      setAudioSession(); // back to the normal audio mode
       setSub(); resolve({ started, error: errName });
     };
     const say = () => {
@@ -396,6 +417,50 @@ function speakDeviceNow(text) {
 // the moment it arrives, back to back, through Web Audio (the route the beeps use, which you can hear).
 // Finished voices are kept, so the stall line, "Number 1…" and repeats are instant.
 const voiceJobs = new Map();
+// What has been spent today (Cloudflare's free allowance resets at 00:00 UTC), so you can see it coming.
+const USAGE_KEY = 'cardAssistant.usage.v1';
+const utcDay = () => new Date().toISOString().slice(0, 10);
+const freshUsage = () => ({ day: utcDay(), dg: 0, cf: 0, gemini: 0, neurons: 0 });
+let usage = (() => { try { const u = JSON.parse(localStorage.getItem(USAGE_KEY) || '{}'); if (u.day === utcDay()) return { ...freshUsage(), ...u }; } catch {} return freshUsage(); })();
+function addUsage(k, n) {
+  if (usage.day !== utcDay()) usage = freshUsage();
+  usage[k] = (usage[k] || 0) + n;
+  try { localStorage.setItem(USAGE_KEY, JSON.stringify(usage)); } catch {}
+}
+const neuronRate = (model) => (/aura-2/i.test(model) ? 2.73 : /aura/i.test(model) ? 1.36 : /melo/i.test(model) ? 0.02 : 1.5); // Cloudflare units per character (about)
+function usageText() {
+  const bits = [];
+  if (usage.cf) bits.push('Cloudflare ' + usage.cf.toLocaleString() + ' characters ≈ ' + Math.round(usage.neurons).toLocaleString() + ' of 10,000 free units (' + Math.round(usage.neurons / 100) + '%)');
+  if (usage.dg) bits.push('Deepgram ' + usage.dg.toLocaleString() + ' characters');
+  if (usage.gemini) bits.push('Gemini voice ' + usage.gemini + ' lines');
+  return 'Voice used today: ' + (bits.join(' · ') || 'nothing yet');
+}
+// Short lines (the stall line, "Number 1.", "Ready") are made once and kept on the phone, so they never cost anything again.
+let vdbp = null;
+function vdb() {
+  if (!vdbp) vdbp = new Promise((res, rej) => { const r = indexedDB.open('cardAssistantVoice', 1); r.onupgradeneeded = () => r.result.createObjectStore('clips'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  return vdbp;
+}
+async function clipGet(key) {
+  const d = await vdb();
+  return new Promise((res) => {
+    const q = d.transaction('clips').objectStore('clips').get(key);
+    q.onsuccess = () => { const v = q.result; if (!v) return res(null); const i16 = new Int16Array(v.pcm), f = new Float32Array(i16.length); for (let i = 0; i < f.length; i++) f[i] = i16[i] / 32768; res({ data: f, rate: v.rate, model: v.model }); };
+    q.onerror = () => res(null);
+  });
+}
+async function clipPut(key, job) {
+  const total = job.chunks.reduce((a, c) => a + c.data.length, 0);
+  if (!total || total > 24000 * 14) return;
+  const i16 = new Int16Array(total); let o = 0;
+  for (const c of job.chunks) for (let i = 0; i < c.data.length; i++) i16[o++] = Math.max(-32768, Math.min(32767, Math.round(c.data[i] * 32767)));
+  const d = await vdb();
+  await new Promise((res) => { const tx = d.transaction('clips', 'readwrite'), st = tx.objectStore('clips'); st.put({ pcm: i16.buffer, rate: job.chunks[0].rate, model: job.model || '', at: Date.now() }, key); const c = st.count(); c.onsuccess = () => { if (c.result > 150) st.clear(); }; tx.oncomplete = res; tx.onerror = res; });
+}
+async function clipClear() { const d = await vdb(); return new Promise((res) => { const tx = d.transaction('clips', 'readwrite'); tx.objectStore('clips').clear(); tx.oncomplete = res; tx.onerror = res; }); }
+
+async function clipClear() { const d = await vdb(); return new Promise((res) => { const tx = d.transaction('clips', 'readwrite'); tx.objectStore('clips').clear(); tx.oncomplete = res; tx.onerror = res; }); }
+
 let workerInfo = null; // what the Worker said about itself (version, Cloudflare voice connected?)
 // Ask the Worker what it can do, so we never send a Cloudflare voice request to an old Worker
 // (an old Worker would quietly pass it to Gemini and use up the Gemini quota).
@@ -405,18 +470,23 @@ async function checkWorker() {
     const r = await fetch(S.workerUrl.trim().replace(/\/$/, ''), { headers: { 'X-App-Token': S.token.trim() } });
     workerInfo = await r.json();
   } catch { return workerInfo; } // offline: leave things as they were
+  engineDown.dg = workerInfo.dg ? '' : ((workerInfo.version || 1) < 8 ? 'needs the newest Worker (proxy.js)' : 'not set up (no DEEPGRAM_API_KEY secret)');
   if ((workerInfo.version || 1) < MIN_WORKER_VERSION) engineDown.cf = 'Worker is out of date — paste the new proxy.js into Cloudflare';
   else if (!workerInfo.ai) engineDown.cf = 'not connected — add a Workers AI binding to the Worker';
   else engineDown.cf = '';
-  sev('Worker v' + (workerInfo.version || '?') + (workerInfo.ai ? ', Cloudflare voice connected' : ', no Cloudflare voice'));
+  sev('Worker v' + (workerInfo.version || '?') + (workerInfo.ai ? ', Cloudflare voice connected' : ', no Cloudflare voice') + (workerInfo.dg ? ', Deepgram voice set up' : ''));
   setSub();
   return workerInfo;
 }
-const engineDown = { cf: '', gemini: '' }; // set when an engine can't be used this session (daily limit, not connected)
-function netVoice() { return (S.voiceEngine === 'cf' || S.voiceEngine === 'gemini') && !!S.workerUrl; }
-const engineBackoff = { cf: 0, gemini: 0 }, engineFails = { cf: 0, gemini: 0 }; // temporary pauses (a failing voice isn't hammered)
-function voiceOrder() { // the chosen voice first, the other online voice as backup
-  const list = (S.voiceEngine === 'gemini' ? ['gemini', 'cf'] : ['cf', 'gemini']).filter((e) => !engineDown[e]);
+const engineDown = { dg: '', cf: '', gemini: '', device: '' }; // set when an engine can't be used this session (daily limit, not connected)
+function netVoice() { return S.voiceEngine !== 'device' && !!S.workerUrl; }
+const isParallel = (e) => e === 'cf' || e === 'dg'; // these are cheap and quick enough to start all at once
+const engineBackoff = { dg: 0, cf: 0, gemini: 0, device: 0 }, engineFails = { dg: 0, cf: 0, gemini: 0, device: 0 }; // temporary pauses (a failing voice isn't hammered)
+function resetEngines() { for (const e of Object.keys(engineDown)) { engineDown[e] = ''; engineBackoff[e] = 0; engineFails[e] = 0; } }
+function voiceOrder() { // your choice first ("auto" = the best you have set up), the others as backup, the iPhone voice last of all
+  const all = ['dg', 'cf', 'gemini'];
+  const pref = S.voiceEngine === 'auto' || S.voiceEngine === 'device' ? all : [S.voiceEngine, ...all.filter((e) => e !== S.voiceEngine)];
+  const list = pref.filter((e) => !engineDown[e]).concat(S.deviceFallback !== false ? ['device'] : []);
   const live = list.filter((e) => Date.now() >= engineBackoff[e]);
   return live.length ? live : list; // if every voice is pausing, still try rather than stay silent
 }
@@ -425,10 +495,14 @@ function quotaWaitMs(m) { // "retry in 53.3s" -> 53300
   if (!r) return 60000;
   return ((parseFloat(r[1] || 0) * 3600) + (parseFloat(r[2] || 0) * 60) + parseFloat(r[3] || 0)) * 1000 || 60000;
 }
-function isQuota(m) { return /quota|exceeded|rate.?limit|RESOURCE_EXHAUSTED|\b429\b/i.test(String(m || '')); }
+function isQuota(m) { return /quota|exceeded|rate.?limit|RESOURCE_EXHAUSTED|\b429\b|daily free allocation|neurons|\b4006\b|insufficient credits|\(HTTP 402\)/i.test(String(m || '')); }
+const nextUtcMidnight = () => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); };
 // Turn Google's long error texts into one short line.
 function friendlyError(m) {
   m = String(m || '');
+  if (/daily free allocation|neurons|\b4006\b/i.test(m)) return 'Cloudflare free daily limit used up (10,000 units) — resets at ' + nextUtcMidnight() + ' your time';
+  if (/Deepgram/i.test(m) && /insufficient credits|\b402\b/i.test(m)) return 'Deepgram credit is used up — add credit, or use another voice';
+  if (/Deepgram/i.test(m) && /\b40[13]\b|invalid credentials/i.test(m)) return 'Deepgram rejected the key — check the DEEPGRAM_API_KEY secret';
   if (isQuota(m)) {
     const what = /per day|PerDay/i.test(m) ? 'daily' : /per minute|PerMinute/i.test(m) ? 'per-minute' : '';
     const model = (/model: ([\w.\-]+)/.exec(m) || [])[1];
@@ -448,7 +522,13 @@ function friendlyError(m) {
 async function playVoice(text, firstJob, more = false) {
   const errs = [];
   for (const eng of voiceOrder()) {
-    const tries = eng === 'gemini' ? [{ stream: true }, { stream: false }] : [{}, { retry: true }]; // Cloudflare: one more go if a piece times out
+    if (eng === 'device') { // last resort: the iPhone's own voice (unlimited and free)
+      holdLoop(true);
+      try { const r = await speakDeviceNow(text); if (r.started && !r.error) { if (/^Voice/.test(speechNote)) speechNote = ''; return; } errs.push('iPhone voice did not start'); }
+      finally { releaseLoop(); }
+      continue;
+    }
+    const tries = eng === 'gemini' ? [{ stream: true }, { stream: false }] : [{}, { retry: true }]; // Cloudflare / Deepgram: one more go if a piece times out
     for (const t of tries) {
       const job = (firstJob && !firstJob.failed && firstJob.engine === eng && t.stream !== false && !t.retry) ? firstJob : voiceJob(text, { engine: eng, ...t });
       try {
@@ -457,16 +537,17 @@ async function playVoice(text, firstJob, more = false) {
         return;
         engineFails[eng] = 0;
       } catch (e) {
-        const msg = friendlyError(e.message), who = eng === 'cf' ? 'Cloudflare' : 'Gemini';
+        const msg = friendlyError(e.message), who = { dg: 'Deepgram', cf: 'Cloudflare', gemini: 'Gemini' }[eng];
         errs.push(who + ': ' + msg);
         sev(who + ' voice failed: ' + String(e.message).slice(0, 300));
-        if (/not connected|out of date/i.test(e.message) || (isQuota(e.message) && /per.?day|PerDay/i.test(e.message))) { engineDown[eng] = msg; break; }
+        if (/not connected|not set up|out of date|DEEPGRAM_API_KEY/i.test(e.message) || (isQuota(e.message) && /per.?day|PerDay|daily|insufficient credits|\(HTTP 402\)/i.test(e.message))) { engineDown[eng] = msg; break; }
         if (isQuota(e.message)) { engineBackoff[eng] = Date.now() + Math.min(quotaWaitMs(e.message) + 2000, 120000); break; } // per-minute: wait it out
         if (++engineFails[eng] >= 2) { engineBackoff[eng] = Date.now() + 45000; engineFails[eng] = 0; sev(who + ' voice paused for 45 s after repeated failures'); break; }
       }
     }
   }
   if (!errs.length) { // every voice was already ruled out this session: say why
+    if (engineDown.dg && S.voiceEngine === 'dg') errs.push('Deepgram: ' + engineDown.dg);
     if (engineDown.cf) errs.push('Cloudflare: ' + engineDown.cf);
     if (engineDown.gemini) errs.push('Gemini: ' + engineDown.gemini);
   }
@@ -475,27 +556,34 @@ async function playVoice(text, firstJob, more = false) {
 }
 function voiceJob(text, opts = {}) {
   text = cleanSpeech(text);
-  const engine = opts.engine || (S.voiceEngine === 'gemini' ? 'gemini' : 'cf');
+  const engine = opts.engine || voiceOrder().find((e) => e !== 'device') || 'cf';
   const stream = engine === 'gemini' && opts.stream !== false;
-  const key = engine + '|' + (engine === 'cf' ? S.cfModel + '|' + S.cfVoice : S.ttsVoice + '|' + S.ttsModel) + '|' + text;
+  const key = engine + '|' + (engine === 'cf' ? S.cfModel + '|' + S.cfVoice : engine === 'dg' ? S.dgVoice : S.ttsVoice + '|' + S.ttsModel) + '|' + text;
   const have = voiceJobs.get(key);
-  if (have && !have.failed) return have;
+  if (have && !have.failed && !opts.nocache) return have;
   const job = { text, engine, chunks: [], done: false, failed: null, mode: '', t0: performance.now(), firstMs: 0, totalMs: 0, waiters: [] };
   const wake = () => { job.waiters.splice(0).forEach((f) => f()); };
   job.wait = () => new Promise((r) => job.waiters.push(r));
   voiceJobs.set(key, job);
   if (voiceJobs.size > 80) voiceJobs.delete(voiceJobs.keys().next().value);
   (async () => {
-    const ctrl = new AbortController(), tm = setTimeout(() => ctrl.abort(), engine === 'cf' ? 15000 : 25000);
+    const ctrl = new AbortController(), tm = setTimeout(() => ctrl.abort(), engine === 'gemini' ? 25000 : 15000);
     try {
+      const cached = S.cacheClips !== false && !opts.nocache && text.length <= 160 ? await clipGet(key).catch(() => null) : null;
+      if (cached) { // made before and kept on the phone: free and instant
+        job.mode = 'saved on this phone'; job.model = cached.model || ''; job.firstMs = Math.round(performance.now() - job.t0);
+        job.chunks.push({ data: cached.data, rate: cached.rate }); wake();
+      } else {
+      addUsage(engine === 'gemini' ? 'gemini' : engine, engine === 'gemini' ? 1 : text.length);
       const r = await fetch(S.workerUrl.trim().replace(/\/$/, ''), {
         method: 'POST', signal: ctrl.signal,
         headers: { 'Content-Type': 'application/json', 'X-App-Token': S.token.trim() },
-        body: JSON.stringify(engine === 'cf' ? { tts: text, engine: 'cf', cfModel: S.cfModel, cfVoice: S.cfVoice } : { tts: text, voice: S.ttsVoice, model: S.ttsModel, stream }),
+        body: JSON.stringify(engine === 'cf' ? { tts: text, engine: 'cf', cfModel: S.cfModel, cfVoice: S.cfVoice } : engine === 'dg' ? { tts: text, engine: 'dg', dgVoice: S.dgVoice } : { tts: text, voice: S.ttsVoice, model: S.ttsModel, stream }),
       });
       if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || 'HTTP ' + r.status); }
       const ct = r.headers.get('Content-Type') || '';
       job.model = r.headers.get('X-Cf-Model') || '';
+      if (engine === 'cf') addUsage('neurons', text.length * neuronRate(job.model));
       if (/L16|pcm/i.test(ct) && r.body && r.body.getReader) {
         job.mode = 'streamed';
         const rate = +((/rate=(\d+)/.exec(ct) || [])[1] || 24000);
@@ -524,6 +612,8 @@ function voiceJob(text, opts = {}) {
         job.chunks.push({ data: buf.getChannelData(0), rate: buf.sampleRate }); wake();
       } else throw new Error('Worker is out of date — paste the new proxy.js into Cloudflare');
       if (!job.chunks.length) throw new Error('no audio came back');
+      if (S.cacheClips !== false && text.length <= 160) clipPut(key, job).catch(() => {});
+      }
     } catch (e) {
       job.failed = e.name === 'AbortError' ? new Error('timed out') : e;
       if (voiceJobs.get(key) === job) voiceJobs.delete(key);
@@ -564,11 +654,11 @@ async function playJob(job, more = false) {
   // if another piece follows, come back a moment BEFORE this one ends, so the next one is already queued
   if (left > 0) await sleep(more ? Math.max(0, left * 1000 - 250) : left * 1000 + 60);
 }
-function prewarmVoice() { // make the lines we know in advance, so they play instantly
+function prewarmVoice() { // make the short fixed lines in advance (once ever: they are then kept on the phone)
   if (!netVoice()) return;
-  const eng = voiceOrder()[0]; if (!eng) return;
+  const eng = voiceOrder().find((e) => e !== 'device'); if (!eng) return;
   voiceJob(S.stallLine, { engine: eng, stream: false });
-  if (eng === 'cf') for (let n = 1; n <= 6; n++) voiceJob('Number ' + n + '.', { engine: 'cf' }); // Gemini: too few free requests to spare
+  if (isParallel(eng)) for (let n = 1; n <= 6; n++) voiceJob('Number ' + n + '.', { engine: eng }); // Gemini: too few free requests to spare
 }
 
 // Must run inside a tap or key press: it "unlocks" speech and sound on iOS.
@@ -584,7 +674,7 @@ function unlockSpeech() {
   setAudioSession();
 }
 function setAudioSession() { // "playback" lets sound play even with the ringer switch on silent (iOS 16.4+)
-  try { if (navigator.audioSession) navigator.audioSession.type = S.audioSessionMode === 'auto' ? 'auto' : 'playback'; } catch {}
+  try { if (navigator.audioSession) navigator.audioSession.type = S.voiceEngine === 'device' ? deviceMode().session : (S.audioSessionMode === 'auto' ? 'auto' : 'playback'); } catch {}
 }
 function updateSpeechInfo() {
   $('speechInfo').textContent = 'Voices on this phone: ' + speechSynthesis.getVoices().length + (speechNote ? '\n⚠ ' + speechNote : '');
@@ -865,10 +955,10 @@ function greyOf(ctx, w, h) {
 // Runs on the phone, on the small picture used for motion, so it costs no Gemini calls. It asks "is there a
 // page / card in view?" without looking at text, so blurry pages, nearly blank pages and small index cards count.
 const PAGE_PRESETS = {
-  broad:  { minFill: 0.45, minContrast: 22, maxSat: 0.70, paleMean: 95, edgeDiv: 20, minL: 55 },
-  strict: { minFill: 0.70, minContrast: 45, maxSat: 0.40, paleMean: 130, edgeDiv: 10, minL: 80 },
+  broad:  { minFill: 0.45, minContrast: 22, maxSat: 0.70, paleMean: 95, edgeDiv: 20, minL: 55, maxChroma: 15 },
+  strict: { minFill: 0.70, minContrast: 45, maxSat: 0.40, paleMean: 130, edgeDiv: 10, minL: 80, maxChroma: 9 },
 };
-let lastPage = { present: true, frac: 0, bbox: null, reason: '', method: '' };
+let lastPage = { present: true, frac: 0, bbox: null, reason: '', method: '' }, smoothBox = null;
 let lastRGBA = null, learnEmpty = null, refCache = { key: '', ref: null };
 
 function otsuThreshold(hist, n) {
@@ -910,12 +1000,14 @@ const normBox = (b, w, h) => ({ x0: b.x0 / w, y0: b.y0 / h, x1: (b.x1 + 1) / w, 
 // share of the picture (0–1). Returns { present, frac, bbox, reason, method }.
 function detectPage(data, w, h, P, ref, minArea) {
   const n = w * h, L = new Uint8Array(n), sat = new Uint8Array(n), hist = new Uint32Array(256);
+  const cu = new Int16Array(n), cv = new Int16Array(n); // colour (red-green, yellow-blue): paper has ONE colour, a blanket has many
   let sum = 0, sumSat = 0;
   for (let i = 0, j = 0; j < n; i += 4, j++) {
     const r = data[i], g = data[i + 1], b = data[i + 2], mx = Math.max(r, g, b), mn = Math.min(r, g, b);
     const l = (0.299 * r + 0.587 * g + 0.114 * b) | 0;
     L[j] = l; hist[l]++; sum += l;
     const sv = mx ? ((mx - mn) * 255 / mx) | 0 : 0; sat[j] = sv; sumSat += sv;
+    cu[j] = r - g; cv[j] = ((r + g) >> 1) - b;
   }
   const mean = sum / n, meanSat = sumSat / n / 255;
   const pct = (q) => { let acc = 0; const t = Math.ceil(n * q); for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= t) return i; } return 255; };
@@ -948,9 +1040,9 @@ function detectPage(data, w, h, P, ref, minArea) {
   if (!blob) return no('no bright region');
   const frac = blob.area / n, bw = blob.x1 - blob.x0 + 1, bh = blob.y1 - blob.y0 + 1, fill = blob.area / (bw * bh);
   const avgSat = blob.sumSat / blob.area / 255;
-  let lsum = 0, gsum = 0, gcount = 0;
+  let lsum = 0, gsum = 0, gcount = 0, usum = 0, vsum = 0;
   for (let k = blob.start; k < blob.end; k++) {
-    const q = blob.order[k]; lsum += L[q];
+    const q = blob.order[k]; lsum += L[q]; usum += cu[q]; vsum += cv[q];
     const x = q % w, y = (q / w) | 0;
     if (x < 1 || y < 1 || x > w - 2 || y > h - 2) continue;
     if (mask[q - 1] && mask[q + 1] && mask[q - w] && mask[q + w]) continue; // not on the edge of the region
@@ -958,10 +1050,14 @@ function detectPage(data, w, h, P, ref, minArea) {
     gsum += Math.sqrt(gx * gx + gy * gy); gcount++;
   }
   const meanL = lsum / blob.area, edge = gcount ? gsum / gcount : Infinity;
-  const base = { frac, bbox: normBox(blob, w, h), method: 'auto' };
+  const u0 = usum / blob.area, v0 = vsum / blob.area; let dev = 0; // how much the colour wanders inside the region
+  for (let k = blob.start; k < blob.end; k++) { const q = blob.order[k]; dev += Math.abs(cu[q] - u0) + Math.abs(cv[q] - v0); }
+  const chroma = dev / blob.area / 2;
+  const base = { frac, bbox: normBox(blob, w, h), method: 'auto', chroma: Math.round(chroma) };
   if (frac < minArea) return { ...base, present: false, reason: 'bright region is too small (' + (frac * 100).toFixed(1) + '%)' };
   if (fill < P.minFill) return { ...base, present: false, reason: 'bright region is not boxy' };
   if (avgSat > P.maxSat) return { ...base, present: false, reason: 'too colourful to be paper' };
+  if (chroma > P.maxChroma) return { ...base, present: false, reason: 'several colours (' + Math.round(chroma) + '), paper is one plain colour' };
   if (meanL < P.minL) return { ...base, present: false, reason: 'region is too dim' };
   if (edge < contrast / P.edgeDiv) return { ...base, present: false, reason: 'soft glow, no clear edge' };
   return { ...base, present: true, reason: 'paper-like region' };
@@ -976,11 +1072,19 @@ function emptyRefFor(w, h) {
   if (refCache.key !== r.b64) { try { const bin = atob(r.b64), L = new Uint8Array(bin.length); for (let i = 0; i < L.length; i++) L[i] = bin.charCodeAt(i); refCache = { key: r.b64, ref: { L, p10: r.p10 } }; } catch { return null; } }
   return refCache.ref;
 }
+let pageYes = 0, pageNo = 0, pageStable = false;
 function detectCurrent() {
-  if (S.pageDetect === 'off' || !lastRGBA) return (lastPage = { present: true, frac: 0, bbox: null, reason: 'page detection is off', method: 'off' });
+  if (S.pageDetect === 'off' || !lastRGBA) { pageYes = pageNo = 0; pageStable = false; return (lastPage = { present: true, frac: 0, bbox: null, reason: 'page detection is off', method: 'off' }); }
   const P = PAGE_PRESETS[S.pageDetect] || PAGE_PRESETS.broad;
   const minArea = Math.max(0.2, +S.minPagePct || 2, S.pageDetect === 'strict' ? 6 : 0) / 100;
-  lastPage = detectPage(lastRGBA.data, lastRGBA.w, lastRGBA.h, P, emptyRefFor(lastRGBA.w, lastRGBA.h), minArea);
+  const raw = detectPage(lastRGBA.data, lastRGBA.w, lastRGBA.h, P, emptyRefFor(lastRGBA.w, lastRGBA.h), minArea);
+  // One odd frame (a flicker, a hand passing) must not flip the answer: a page "appears" after 2 sightings in a
+  // row and "goes" after 3 misses in a row.
+  if (raw.present) { pageYes++; pageNo = 0; } else { pageNo++; pageYes = 0; }
+  if (!pageStable && pageYes >= 2) pageStable = true;
+  if (pageStable && pageNo >= 3) pageStable = false;
+  lastPage = { ...raw, rawPresent: raw.present, present: pageStable };
+  if (!pageStable && raw.present) lastPage.reason = 'seeing a page… (confirming)';
   return lastPage;
 }
 // "Learn empty view": averages a few pictures of the empty box and remembers them.
@@ -1219,7 +1323,7 @@ async function runCapture(c) {
     entry.status = stalled ? 'late-answer' : 'answer'; next = 'speak';
     entry.items = parsed.items.length;
     last = { q: parsed.q, a: parsed.a, items: parsed.items, text: res.text };
-    if (netVoice() && voiceOrder()[0] === 'cf') itemTexts(parsed.items).forEach((t) => voiceChunks(t).forEach((c) => voiceJob(c, { engine: 'cf' }))); // start making the voice now
+    if (netVoice() && isParallel(voiceOrder()[0])) itemTexts(parsed.items).forEach((t) => voiceChunks(t).forEach((c) => voiceJob(c, { engine: voiceOrder()[0] }))); // start making the voice now
   }
   logCapture(entry); // logged BEFORE speaking, so it is saved even if something interrupts the speech
   showLast(entry);
@@ -1271,15 +1375,28 @@ function displayItems(items) {
   if (items.length === 1) return items[0].a;
   return items.map((it, i) => (i + 1) + '. ' + (it.q ? it.q + '\n→ ' : '') + it.a).join('\n\n');
 }
+// Longest thing we will speak in one go (characters). Keeps the free voice allowance going and the show moving.
+function budgetTexts(list) {
+  const max = +S.maxVoiceChars || 0; if (!max) return list;
+  const out = []; let total = 0;
+  for (const t of list) {
+    if (total + t.length <= max) { out.push(t); total += t.length; continue; }
+    const room = max - total;
+    if (room > 60) { const cut = t.lastIndexOf('. ', room); out.push(cut > 30 ? t.slice(0, cut + 1) : t.slice(0, room)); }
+    sev('answer shortened to fit the ' + max + '-character voice limit');
+    break;
+  }
+  return out;
+}
 function itemTexts(items) { // exactly what gets spoken, in order
-  const many = items.length > 1, out = [], gem = netVoice() && voiceOrder()[0] === 'cf'; // separate ready-made "Number 1." only with the Cloudflare voice
+  const many = items.length > 1, out = [], gem = netVoice() && isParallel(voiceOrder()[0]); // separate ready-made "Number 1." only with the Cloudflare / Deepgram voice
   items.forEach((it, i) => {
     const lead = many ? 'Number ' + (i + 1) + '.' : '';
     if (gem && lead) out.push(lead); // ready-made, plays instantly while the answer is being voiced
     const pre = !gem && lead ? lead + ' ' : '';
     if (S.speakQuestion && it.q) { out.push(pre + it.q); out.push(it.a); } else out.push(pre + it.a);
   });
-  return out;
+  return budgetTexts(out);
 }
 function speakItems(items) { itemTexts(items).forEach((t) => speak(t)); return speechChain; }
 
@@ -1356,13 +1473,20 @@ function updateMeters(still) {
   $('mFps').textContent = fpsShown ? fpsShown.toFixed(1) : '–';
   const pm = $('mPage'); pm.textContent = S.pageDetect === 'off' ? 'off' : lastPage.present ? '✓ ' + Math.round(lastPage.frac * 100) + '%' : '✕';
   pm.style.color = S.pageDetect !== 'off' && lastPage.present ? 'var(--ok)' : 'var(--fg)';
-  const pb = $('pageBox'), bb = lastPage.present && S.pageDetect !== 'off' && lastPage.bbox;
+  const pb = $('pageBox');
+  let bb = lastPage.present && S.pageDetect !== 'off' && lastPage.bbox;
+  if (bb) { // ease the outline toward the new box instead of jumping
+    smoothBox = smoothBox ? { x0: smoothBox.x0 + (bb.x0 - smoothBox.x0) * 0.5, y0: smoothBox.y0 + (bb.y0 - smoothBox.y0) * 0.5, x1: smoothBox.x1 + (bb.x1 - smoothBox.x1) * 0.5, y1: smoothBox.y1 + (bb.y1 - smoothBox.y1) * 0.5 } : { ...bb };
+    bb = smoothBox;
+  } else smoothBox = null;
   if (bb && !(bb.x0 <= 0.001 && bb.y0 <= 0.001 && bb.x1 >= 0.999 && bb.y1 >= 0.999)) {
     const c = S.useCrop ? S.crop : { x: 0, y: 0, w: 1, h: 1 };
     pb.style.left = (c.x + bb.x0 * c.w) * 100 + '%'; pb.style.top = (c.y + bb.y0 * c.h) * 100 + '%';
     pb.style.width = (bb.x1 - bb.x0) * c.w * 100 + '%'; pb.style.height = (bb.y1 - bb.y0) * c.h * 100 + '%'; pb.hidden = false;
   } else pb.hidden = true;
   $('readsInfo').textContent = 'Cards sent to Gemini this session: ' + readCount;
+  $('usageInfo').textContent = usageText();
+  $('pageWhy').textContent = S.pageDetect === 'off' ? 'Page detection is off.' : 'Page: ' + (lastPage.present ? '✓ ' : '✕ ') + lastPage.reason + (lastPage.method === 'empty view' ? ' [vs empty view]' : '') + (lastPage.chroma != null ? ' · colour spread ' + lastPage.chroma : '');
   renderState(); setSub();
 }
 let lastFull = null, readerPx = 28;
@@ -1411,7 +1535,7 @@ $('btnStart').onclick = async () => {
   $('stage').classList.add('on');
   drawCropBox();
   await tone('start');
-  if (netVoice()) { await checkWorker(); prewarmVoice(); if (S.sayReady && voiceOrder()[0] === 'cf') speak('Ready'); }
+  if (netVoice()) { await checkWorker(); prewarmVoice(); if (S.sayReady && isParallel(voiceOrder()[0])) speak('Ready'); }
   if (S.autoArm) setArmed(true);
   loop();
 };
@@ -1432,6 +1556,7 @@ $('btnShow').onclick = () => setShowMode(true);
 })();
 $('btnCam').onclick = () => restartCamera('manual');
 $('btnLearnEmpty').onclick = () => { if (!running) { $('emptyInfo').textContent = 'Tap START first, then learn the empty view.'; return; } startLearnEmpty(); };
+$('btnClearClips').onclick = async () => { await clipClear(); voiceJobs.clear(); $('clipInfo').textContent = 'Saved voice clips forgotten.'; };
 $('btnClearEmpty').onclick = () => { S.emptyRef = null; saveSettings(); refCache = { key: '', ref: null }; updateEmptyInfo(); };
 $('btnTestVoice').onclick = () => {
   audioCtx(); setAudioSession(); speechNote = '';
@@ -1440,51 +1565,117 @@ $('btnTestVoice').onclick = () => {
 // ---------------------------------------------------------------- audio check
 // Plays a beep and four numbered voices; you tick which you heard and the app switches to what works.
 let acReport = '';
+let acTests = [];
 async function runAudioCheck() {
   audioCtx(); setAudioSession(); // inside the tap, so iOS allows sound
   const out = $('acOut'), lines = [];
   const log = (t) => { lines.push(t); out.textContent = lines.join('\n'); acReport = lines.join('\n'); };
   const banner = (t) => { $('acBanner').textContent = t; };
   $('acHeard').hidden = true; $('btnAudioCheck').disabled = true; $('acMsg').textContent = '';
-  ['acH1', 'acH2', 'acH3', 'acH4'].forEach((id) => { $(id).checked = false; });
   log('App ' + APP_VERSION + ' · ' + (navigator.userAgent.match(/(iPhone|iPad)[^;)]*|OS [\d_]+|Version\/[\d.]+/g) || [navigator.userAgent.slice(0, 60)]).join(' · '));
   await speechChain; // don't talk over an answer that is still being spoken
+  await checkWorker();
   const c = await ensureAudioRunning();
   log('Audio mode: ' + (navigator.audioSession ? navigator.audioSession.type : 'not supported') + ' · Web Audio: ' + c.state +
       ' · background sound: ' + (keepAlive && !keepAlive.paused ? 'playing' : 'off') + ' · camera: ' + (track && track.readyState === 'live' ? 'on' : 'off'));
-  banner('1 of 4 — beep'); await beepNow('answer'); await sleep(600); log('1. Beep — played (Web Audio ' + c.state + ')');
-  const stamp = new Date().toLocaleTimeString();
-  for (const [n, eng, name] of [[2, 'cf', 'Cloudflare voice'], [3, 'gemini', 'Gemini voice']]) {
-    banner(n + ' of 4 — ' + name);
+  log(usageText());
+  // Which voices to try: only ones that can work. (Gemini voice only if you chose it: its free limit is about 10 lines a day.)
+  acTests = [{ kind: 'beep', name: 'Beep' }];
+  if (S.workerUrl && workerInfo) {
+    if (workerInfo.dg) acTests.push({ kind: 'dg', name: 'Deepgram voice' });
+    if (workerInfo.ai) acTests.push({ kind: 'cf', name: 'Cloudflare voice' });
+    if (S.voiceEngine === 'gemini') acTests.push({ kind: 'gemini', name: 'Gemini voice' });
+  }
+  acTests.push({ kind: 'device', name: 'iPhone voice' });
+  acTests.forEach((t, i) => { t.n = i + 1; });
+  const total = acTests.length, names = ['', 'One', 'Two', 'Three', 'Four', 'Five'];
+  for (const t of acTests) {
+    banner(t.n + ' of ' + total + ' — ' + t.name);
+    if (t.kind === 'beep') { await beepNow('answer'); await sleep(600); log('1. Beep — played (Web Audio ' + c.state + ')'); continue; }
+    if (t.kind === 'device') {
+      const r = await speakDeviceNow(names[t.n] + '. iPhone voice.');
+      log(t.n + '. iPhone voice — ' + (r.started ? 'started' + (r.error ? ', then error: ' + r.error : ' and finished') : 'did NOT start' + (r.error ? ' (' + r.error + ')' : '')));
+      await wakeAudio(); continue;
+    }
     try {
-      const job = voiceJob(['', '', 'Two', 'Three'][n] + '. ' + name + '. ' + stamp, { engine: eng, stream: eng === 'gemini' });
+      const job = voiceJob(names[t.n] + '. ' + t.name + '.', { engine: t.kind, stream: t.kind === 'gemini', nocache: true });
       await playJob(job);
-      log(n + '. ' + name + (job.model ? ' (' + job.model + ')' : '') + ' — played, ' + job.mode + ', first sound after ' + job.firstMs + ' ms');
-    } catch (e) { log(n + '. ' + name + ' — FAILED: ' + friendlyError(e.message)); }
+      log(t.n + '. ' + t.name + (job.model ? ' (' + job.model + ')' : '') + ' — played, ' + job.mode + ', first sound after ' + job.firstMs + ' ms');
+    } catch (e) { log(t.n + '. ' + t.name + ' — FAILED: ' + friendlyError(e.message)); }
     await sleep(300);
   }
-  banner('4 of 4 — iPhone voice (for comparison)');
-  const r = await speakDeviceNow('Four. iPhone voice.');
-  log('4. iPhone voice — ' + (r.started ? 'started' + (r.error ? ', then error: ' + r.error : ' and finished') : 'did NOT start' + (r.error ? ' (' + r.error + ')' : '')));
-  await wakeAudio();
+  const list = $('acHeardList'); list.innerHTML = '';
+  for (const t of acTests) { const l = document.createElement('label'); l.className = 'chk'; l.innerHTML = '<input type="checkbox" id="acH' + t.n + '"> ' + t.n + ' — ' + t.name.toLowerCase(); list.appendChild(l); }
   banner('Done — tick the numbers you heard'); $('acHeard').hidden = false; $('btnAudioCheck').disabled = false;
+}
+// ---------------------------------------------------------------- iPhone voice lab
+let labReport = '';
+async function applyDeviceMode(v) {
+  try { if (navigator.audioSession) navigator.audioSession.type = v.session; } catch {}
+  if (v.loop === 'play') { loopPausedForSpeech = false; if (keepAlive && keepAlive.paused) await keepAlive.play().catch(() => {}); }
+  else if (keepAlive && !keepAlive.paused) { loopPausedForSpeech = true; keepAlive.pause(); }
+  if (v.wa === 'run') { audioQuiet = false; await ensureAudioRunning(); } else quietWebAudio();
+  await sleep(300);
+}
+async function runLab() {
+  audioCtx(); setAudioSession(); // inside the tap
+  const out = $('labOut'), lines = [];
+  const log = (t) => { lines.push(t); out.textContent = lines.join('\n'); labReport = lines.join('\n'); };
+  const banner = (t) => { $('labBanner').textContent = t; };
+  $('labHeard').hidden = true; $('btnLab').disabled = true; $('labMsg').textContent = '';
+  const prev = S.deviceMode, names = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six'];
+  log('App ' + APP_VERSION + ' · ' + (navigator.userAgent.match(/(iPhone|iPad)[^;)]*|OS [\d_]+|Version\/[\d.]+/g) || [navigator.userAgent.slice(0, 60)]).join(' · '));
+  log('Audio mode: ' + (navigator.audioSession ? navigator.audioSession.type : 'not supported') + ' · voices: ' + speechSynthesis.getVoices().length + ' · camera: ' + (track && track.readyState === 'live' ? 'on' : 'off'));
+  await speechChain; try { speechSynthesis.cancel(); } catch {}
+  await ensureAudioRunning();
+  for (const v of LAB_VARIANTS) {
+    banner('Voice ' + v.id + ' of ' + LAB_VARIANTS.length + ' — ' + v.label);
+    S.deviceMode = v.id; // speakDeviceNow plays in whatever set-up this says
+    holdLoop(true);
+    await applyDeviceMode(v);
+    const r = await speakDeviceNow('Voice ' + names[v.id] + '.');
+    releaseLoop();
+    log(v.id + '. ' + v.label + ' — ' + (r.started ? 'started' + (r.error ? ', then error: ' + r.error : ' and finished') : 'did NOT start' + (r.error ? ' (' + r.error + ')' : '')));
+    await sleep(900);
+  }
+  S.deviceMode = prev; setAudioSession(); await wakeAudio(); playLoop();
+  const list = $('labList'); list.innerHTML = '';
+  for (const v of LAB_VARIANTS) { const l = document.createElement('label'); l.className = 'chk'; l.innerHTML = '<input type="checkbox" id="labH' + v.id + '"> ' + v.id + ' — ' + v.label; list.appendChild(l); }
+  banner('Done — tick the numbers you heard'); $('labHeard').hidden = false; $('btnLab').disabled = false;
 }
 function syncInputs(keys) {
   for (const k of keys) { const el = document.querySelector('[data-k=' + k + ']'); if (!el) continue; if (el.type === 'checkbox') el.checked = !!S[k]; else el.value = S[k]; }
 }
 $('btnAudioCheck').onclick = () => { runAudioCheck().catch((e) => { $('acBanner').textContent = 'Audio check error: ' + e.message; $('btnAudioCheck').disabled = false; }); };
 $('acApply').onclick = () => {
-  const h = (i) => $('acH' + i).checked;
+  const heard = new Set(acTests.filter((t) => { const el = $('acH' + t.n); return el && el.checked; }).map((t) => t.kind));
   let msg;
-  if (h(2)) { S.voiceEngine = 'cf'; msg = 'Set: Cloudflare voice (free daily allowance; Gemini voice as backup).'; }
-  else if (h(3)) { S.voiceEngine = 'gemini'; msg = 'Set: Gemini voice. Note its free limit is small (about 10 lines a day).'; }
-  else if (h(4)) { S.voiceEngine = 'device'; S.pauseLoopForSpeech = true; S.audioSessionMode = 'playback'; msg = 'Set: iPhone voice.'; }
+  if (heard.has('dg')) { S.voiceEngine = 'auto'; msg = 'Set: automatic — the Deepgram voice first, then Cloudflare, Gemini and the iPhone voice as backup.'; }
+  else if (heard.has('cf')) { S.voiceEngine = 'cf'; msg = 'Set: Cloudflare voice. Its free allowance is small (about 7,000 characters a day); a Deepgram key would give you far more (see the README).'; }
+  else if (heard.has('gemini')) { S.voiceEngine = 'gemini'; msg = 'Set: Gemini voice. Its free limit is small (about 10 lines a day).'; }
+  else if (heard.has('device')) { S.voiceEngine = 'device'; S.pauseLoopForSpeech = true; S.audioSessionMode = 'playback'; msg = 'Set: iPhone voice (unlimited and free).'; }
   else msg = 'Nothing worked yet. Check: the silent switch on the left side of the phone (orange = silent), the volume while something plays, and Control Center → the audio-output icon is set to your earbuds. Then run the check again.';
-  if (!h(1)) msg += ' You also did not hear the beep — check the volume and that the earbuds are the audio output.';
+  if (!heard.has('beep')) msg += ' You also did not hear the beep — check the volume and that the earbuds are the audio output.';
   saveSettings(); syncInputs(['voiceEngine', 'pauseLoopForSpeech', 'audioSessionMode']); setAudioSession();
-  engineDown.cf = ''; engineDown.gemini = ''; engineBackoff.cf = engineBackoff.gemini = 0; checkWorker().then(prewarmVoice);
-  acReport += '\nHeard: ' + [1, 2, 3, 4].filter(h).join(', ') + '\n' + msg;
+  resetEngines(); checkWorker().then(prewarmVoice);
+  acReport += '\nHeard: ' + (acTests.filter((t) => heard.has(t.kind)).map((t) => t.n).join(', ') || 'nothing') + '\n' + msg;
   $('acMsg').textContent = msg;
+};
+$('btnLab').onclick = () => { runLab().catch((e) => { $('labBanner').textContent = 'Lab error: ' + e.message; $('btnLab').disabled = false; S.deviceMode = S.deviceMode || 1; }); };
+$('labApply').onclick = () => {
+  const ids = LAB_VARIANTS.filter((v) => { const el = $('labH' + v.id); return el && el.checked; }).map((v) => v.id);
+  let msg;
+  if (ids.length) {
+    S.deviceMode = ids[0]; S.voiceEngine = 'device'; S.deviceFallback = true;
+    msg = 'Set: iPhone voice, set-up ' + ids[0] + ' (' + LAB_VARIANTS[ids[0] - 1].label + '). It is unlimited and free. If answers sound late or quiet, switch back under Speech & sounds → Voice engine.';
+  } else msg = 'Nothing was audible. Flip the silent switch (left side of the phone: show orange = silent, hide orange = sound), make sure the earbuds are the audio output in Control Center, and run the lab again. Then use Copy report and paste it to Claude.';
+  saveSettings(); syncInputs(['voiceEngine']); setAudioSession(); resetEngines();
+  labReport += '\nHeard: ' + (ids.join(', ') || 'nothing') + '\n' + msg;
+  $('labMsg').textContent = msg;
+};
+$('labCopy').onclick = async () => {
+  try { await navigator.clipboard.writeText(labReport + '\n--- recent sound events ---\n' + sevents.join('\n')); $('labMsg').textContent = 'Copied — paste it into the chat.'; }
+  catch { $('labMsg').textContent = 'Could not copy automatically — long-press the report above to select it.'; }
 };
 $('acCopy').onclick = async () => {
   try { await navigator.clipboard.writeText(acReport + '\n--- recent sound events ---\n' + sevents.join('\n')); $('acMsg').textContent = 'Copied — paste it into the chat.'; }
@@ -1514,7 +1705,8 @@ $('btnTestConn').onclick = async () => {
       (j.originOk ? '✅' : '❌') + ' This page is allowed',
       ((j.version || 1) >= MIN_WORKER_VERSION ? '✅ Worker is up to date' : '❌ Worker is OUT OF DATE — paste the new worker/proxy.js into Cloudflare'),
       ((j.version || 1) < MIN_WORKER_VERSION ? '❌ Cloudflare voice needs the new Worker code first' : j.ai ? '✅ Cloudflare voice connected' : '❌ Cloudflare voice not connected — add a Workers AI binding (see README)'),
-      ((j.version || 1) >= MIN_WORKER_VERSION && (j.version || 1) < RECOMMENDED_WORKER_VERSION ? '⚠ Worker v' + j.version + ' — paste the newest proxy.js so retired voice models are skipped automatically' : ''),
+      (j.dg ? '✅ Deepgram voice set up' : (j.version || 1) >= 8 ? 'ℹ Deepgram voice not set up (optional, free credit: see the README)' : ''),
+      ((j.version || 1) >= MIN_WORKER_VERSION && (j.version || 1) < RECOMMENDED_WORKER_VERSION ? '⚠ Worker v' + j.version + ' — paste the newest proxy.js (Deepgram voice, cheaper Cloudflare voice, more Gemini voice models)' : ''),
     ];
     out.textContent = lines.filter(Boolean).join('\n');
   } catch (e) { out.textContent = '❌ Could not reach the Worker: ' + e.message; }

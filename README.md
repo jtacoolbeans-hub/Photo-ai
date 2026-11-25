@@ -175,12 +175,46 @@ quota, no extra key. Gemini's voice is kept as the backup. One-time setup on you
 If a voice runs out of its free allowance, the app stops asking it for the rest of the session and uses the
 other one; the status line shows a short message such as "Gemini free daily limit reached — resets in 11 h 47 m".
 
+### Voice limits, and how to get plenty of free voice (version 1.12+)
+
+**The free allowances are small.** Cloudflare's is 10,000 "units" a day, which on its cheaper voice (aura-1) is only
+about **7,000 characters** (roughly 15 answers) and on its better voice (aura-2) about **3,700**. Gemini's voice is about
+**10 lines a day**. Testing uses it up fast: the app now keeps its fixed short lines (stall line, "Number 1", "Ready")
+on the phone so they are only ever made once, speaks at most **500 characters** per read (**Speech & sounds → Longest
+spoken reply**), tries the cheaper Cloudflare voice first, and shows **"Voice used today"** under the camera view.
+
+**Best fix: a Deepgram key (free credit, no card needed as far as I know).** Deepgram's voices are the same family Cloudflare
+uses, but through Deepgram's own account, so the allowance is separate and much larger (new accounts get free credit worth
+tens of thousands of answers — check the amount on their sign-up page). It is also very fast: sound starts in a fraction of a second.
+
+1. Go to **deepgram.com** and sign up (the Console). Note the free credit it shows.
+2. In the Console open **API Keys → Create a New API Key**, give it any name, and copy the key.
+3. In Cloudflare open **stage-proxy → Settings → Variables and Secrets → Add**: type **Secret**, name
+   `DEEPGRAM_API_KEY`, value = the key. Deploy.
+4. Paste the newest `worker/proxy.js` into **Edit code** and Deploy (this adds the Deepgram voice; version 8).
+5. In the app: **Connection → Test connection** should show **✅ Deepgram voice set up**. **Voice engine → Automatic**
+   (the default) then uses Deepgram first, then Cloudflare, Gemini, and the iPhone voice as the last resort.
+
+**Gemini voice** now accepts several models (comma-separated under **Gemini voice model**): each model has its own free
+quota, and when one is used up the next is tried.
+
+### The iPhone voice (unlimited and free): the lab
+
+The iPhone's own voice has no limits, but on your phone it spoke without any sound. iOS decides whether speech is audible
+(for example with the silent switch on) from what else the page is doing with sound, and the earlier set-up paused
+everything during speech. **Speech & sounds → 🔬 iPhone voice lab** plays "Voice one … six" in six different audio
+set-ups. Run it once with the **silent switch** (left side of the phone) *not* showing orange, tick what you heard, and tap
+**Use it**: that set-up is saved and the iPhone voice is selected. If you heard nothing, flip the switch and run it again, then
+**Copy report** and paste it to Claude. If it works you no longer need any online voice.
+
 ### Page detection (saves your Gemini calls)
 
 Nothing is sent to Gemini unless a page or card is actually in view. The check runs **on the phone** (it
 takes under a millisecond and costs nothing): it looks for a bright, plain, boxy region that stands out from the
 background and has a clear edge. It does not look at text, so **blurry pages, nearly blank pages and small
-index cards all count**. A dim room, a plain wall, a glow, or a colourful TV do not.
+index cards all count**. A dim room, a plain wall, a glow, a colourful TV, or a patterned blanket or clothing do not
+(paper is *one plain colour*; the status line shows the "colour spread" it measured, near 0 for a card and 30+ for a blanket).
+A page needs 2 sightings in a row to count and 3 misses in a row to stop, so one odd frame doesn't flip it.
 
 - The **page** meter under the camera view shows ✓ and the page's share of the picture (✕ if none), and a **dashed
   green outline** shows what it thinks the page is. The status line says why when it sees none, and
