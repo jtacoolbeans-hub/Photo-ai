@@ -30,10 +30,10 @@
  *        which works even when the iPhone's silent switch is on).
  *   GEMINI_TTS_MODEL (Text, optional) default voice model, e.g. gemini-2.5-flash-preview-tts
  *   POST / with { tts: "words", engine: "cf" } -> Cloudflare Workers AI voice instead of Gemini.
- *     Needs a Workers AI binding named AI (Worker -> Settings -> Bindings -> Add -> Workers AI).
+ *     Needs a Workers AI binding (Worker -> Settings -> Bindings -> Add -> Workers AI). Any name works.
  */
 
-const WORKER_VERSION = 5;
+const WORKER_VERSION = 6;
 const DEFAULT_MODEL = 'gemini-flash-latest';
 const DEFAULT_TTS_MODEL = 'gemini-2.5-flash-preview-tts';
 const DEFAULT_CF_TTS = '@cf/myshell-ai/melotts'; // Cloudflare Workers AI voice (free daily allowance)
@@ -77,7 +77,7 @@ export default {
         originOk,
         defaultModel: env.GEMINI_MODEL || DEFAULT_MODEL,
         tts: true,
-        ai: !!env.AI,
+        ai: !!getAI(env),
       });
     }
 
@@ -160,8 +160,15 @@ export default {
 };
 
 // Text -> speech with Cloudflare Workers AI (no Google quota; uses the account's free daily allowance).
+// The Workers AI binding, whatever name it was given in the dashboard (AI, Voice, …).
+function getAI(env) {
+  if (env.AI && typeof env.AI.run === 'function') return env.AI;
+  for (const v of Object.values(env || {})) if (v && typeof v === 'object' && typeof v.run === 'function') return v;
+  return null;
+}
 async function handleCfTts(env, body, cors, json) {
-  if (!env.AI) return json({ error: 'Cloudflare voice is not connected: add a Workers AI binding named AI to this Worker' }, 501);
+  const AI = getAI(env);
+  if (!AI) return json({ error: 'Cloudflare voice is not connected: add a Workers AI binding to this Worker' }, 501);
   const text = String(body.tts).trim().slice(0, 2000);
   if (!text) return json({ error: 'No text to speak' }, 400);
   const model = /^@cf\/[\w.\-\/]{3,80}$/.test(String(body.cfModel || '')) ? String(body.cfModel) : DEFAULT_CF_TTS;
@@ -170,7 +177,7 @@ async function handleCfTts(env, body, cors, json) {
     : { prompt: text, lang: 'en' };
   const t0 = Date.now();
   let out;
-  try { out = await env.AI.run(model, input); }
+  try { out = await AI.run(model, input); }
   catch (e) { return json({ error: 'Cloudflare voice failed: ' + ((e && e.message) || String(e)) }, 502); }
   let bytes = null;
   if (out && typeof out.getReader === 'function') bytes = new Uint8Array(await new Response(out).arrayBuffer());

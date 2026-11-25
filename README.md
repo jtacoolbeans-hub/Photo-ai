@@ -167,7 +167,7 @@ Gemini's voice has a tiny free limit (3 lines a minute, about 10 a day). The app
 quota, no extra key. Gemini's voice is kept as the backup. One-time setup on your phone:
 
 1. **dash.cloudflare.com** → **Workers & Pages** → **card-proxy** → **Settings** → **Bindings** → **Add**
-   → **Workers AI**. Variable name: `AI` (capital letters). Save / Deploy.
+   → **Workers AI**. Any variable name works (e.g. `AI` or `Voice`). Save / Deploy.
 2. **Edit code** → paste the new `worker/proxy.js` → **Deploy**.
 3. In the app: **Connection → Test connection** should show **✅ Worker is up to date** and
    **✅ Cloudflare voice connected**. Then run **Speech & sounds → Audio check** and tick what you heard.

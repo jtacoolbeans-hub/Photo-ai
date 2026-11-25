@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.9.1';
 const MIN_WORKER_VERSION = 5;
 
 // The first version of the prompt. Phones that saved it get the new one automatically.
@@ -138,7 +138,7 @@ function onSettingChanged(k) {
   if (k === 'camId' || k === 'res' || k === 'camFps') { safeMode = false; if (running) startCamera().catch((e) => { camNote = 'Camera error: ' + e.message; setSub(); }); }
   if (k === 'torch') applyTorch();
   if (k === 'useCrop') drawCropBox();
-  if (['stallLine', 'voiceEngine', 'ttsVoice', 'ttsModel', 'cfModel', 'cfVoice'].includes(k)) { engineDown.cf = ''; engineDown.gemini = ''; prewarmVoice(); }
+  if (['stallLine', 'voiceEngine', 'ttsVoice', 'ttsModel', 'cfModel', 'cfVoice', 'workerUrl', 'token'].includes(k)) { engineDown.cf = ''; engineDown.gemini = ''; checkWorker().then(prewarmVoice); }
   if (k === 'audioSessionMode') setAudioSession();
 }
 
@@ -345,6 +345,22 @@ function speakDeviceNow(text) {
 // the moment it arrives, back to back, through Web Audio (the route the beeps use, which you can hear).
 // Finished voices are kept, so the stall line, "Number 1…" and repeats are instant.
 const voiceJobs = new Map();
+let workerInfo = null; // what the Worker said about itself (version, Cloudflare voice connected?)
+// Ask the Worker what it can do, so we never send a Cloudflare voice request to an old Worker
+// (an old Worker would quietly pass it to Gemini and use up the Gemini quota).
+async function checkWorker() {
+  if (!S.workerUrl) return null;
+  try {
+    const r = await fetch(S.workerUrl.trim().replace(/\/$/, ''), { headers: { 'X-App-Token': S.token.trim() } });
+    workerInfo = await r.json();
+  } catch { return workerInfo; } // offline: leave things as they were
+  if ((workerInfo.version || 1) < MIN_WORKER_VERSION) engineDown.cf = 'Worker is out of date — paste the new proxy.js into Cloudflare';
+  else if (!workerInfo.ai) engineDown.cf = 'not connected — add a Workers AI binding to the Worker';
+  else engineDown.cf = '';
+  sev('Worker v' + (workerInfo.version || '?') + (workerInfo.ai ? ', Cloudflare voice connected' : ', no Cloudflare voice'));
+  setSub();
+  return workerInfo;
+}
 const engineDown = { cf: '', gemini: '' }; // set when an engine can't be used this session (daily limit, not connected)
 function netVoice() { return (S.voiceEngine === 'cf' || S.voiceEngine === 'gemini') && !!S.workerUrl; }
 function voiceOrder() { // the chosen voice first, the other online voice as backup
@@ -1158,7 +1174,7 @@ $('btnStart').onclick = async () => {
   $('stage').classList.add('on');
   drawCropBox();
   await tone('start');
-  if (netVoice()) { prewarmVoice(); if (S.sayReady && voiceOrder()[0] === 'cf') speak('Ready'); }
+  if (netVoice()) { await checkWorker(); prewarmVoice(); if (S.sayReady && voiceOrder()[0] === 'cf') speak('Ready'); }
   if (S.autoArm) setArmed(true);
   loop();
 };
@@ -1227,7 +1243,7 @@ $('acApply').onclick = () => {
   else msg = 'Nothing worked yet. Check: the silent switch on the left side of the phone (orange = silent), the volume while something plays, and Control Center → the audio-output icon is set to your earbuds. Then run the check again.';
   if (!h(1)) msg += ' You also did not hear the beep — check the volume and that the earbuds are the audio output.';
   saveSettings(); syncInputs(['voiceEngine', 'pauseLoopForSpeech', 'audioSessionMode']); setAudioSession();
-  engineDown.cf = ''; engineDown.gemini = ''; prewarmVoice();
+  engineDown.cf = ''; engineDown.gemini = ''; checkWorker().then(prewarmVoice);
   acReport += '\nHeard: ' + [1, 2, 3, 4].filter(h).join(', ') + '\n' + msg;
   $('acMsg').textContent = msg;
 };
@@ -1250,6 +1266,7 @@ $('btnTestConn').onclick = async () => {
   const out = $('connOut');
   if (!S.workerUrl) { out.textContent = 'Enter the Worker URL first.'; return; }
   out.textContent = 'Checking…';
+  checkWorker().then(prewarmVoice); // re-check what the Worker can do (e.g. after pasting new code)
   try {
     const j = await (await fetch(S.workerUrl.trim().replace(/\/$/, ''), { headers: { 'X-App-Token': S.token.trim() } })).json();
     const lines = [
@@ -1257,7 +1274,7 @@ $('btnTestConn').onclick = async () => {
       (j.tokenOk ? '✅' : '❌') + ' App token matches',
       (j.originOk ? '✅' : '❌') + ' This page is allowed',
       ((j.version || 1) >= MIN_WORKER_VERSION ? '✅ Worker is up to date' : '❌ Worker is OUT OF DATE — paste the new worker/proxy.js into Cloudflare'),
-      (j.ai ? '✅ Cloudflare voice connected' : '❌ Cloudflare voice not connected — add a Workers AI binding named AI (see README)'),
+      ((j.version || 1) < MIN_WORKER_VERSION ? '❌ Cloudflare voice needs the new Worker code first' : j.ai ? '✅ Cloudflare voice connected' : '❌ Cloudflare voice not connected — add a Workers AI binding (see README)'),
     ];
     out.textContent = lines.join('\n');
   } catch (e) { out.textContent = '❌ Could not reach the Worker: ' + e.message; }
