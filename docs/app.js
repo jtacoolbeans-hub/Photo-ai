@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.14.1';
+const APP_VERSION = '1.14.2';
 const MIN_WORKER_VERSION = 5;
 const RECOMMENDED_WORKER_VERSION = 8; // 8 = Deepgram voice, Gemini model list, cheapest Cloudflare voice first
 
@@ -115,7 +115,7 @@ const DEFAULTS = {
   mediaResolution: 'MEDIA_RESOLUTION_HIGH', thinking: 'minimal', maxTokens: 2048,
   prompt: DEFAULT_PROMPT, style: '', allItems: true,
   voiceEngine: 'device', dgVoice: 'aura-2-thalia-en', cfModel: '@cf/deepgram/aura-1', cfVoice: 'luna', ttsVoice: 'Kore', ttsModel: 'gemini-2.5-flash-preview-tts, gemini-2.5-pro-preview-tts',
-  maxVoiceChars: 500, deviceFallback: true, cacheClips: true, deviceMode: 1, pauseLoopForSpeech: true, audioSessionMode: 'playback', freezeMode: 'speech',
+  maxVoiceChars: 500, deviceFallback: true, cacheClips: true, deviceMode: 4, pauseLoopForSpeech: true, audioSessionMode: 'playback', freezeMode: 'speech',
   maxSide: 2048, jpegQuality: 85,
   timeoutSec: 8, stallLine: 'Great question. Give me just a second with that one.',
   lateAnswer: true, lateSec: 15, retryNone: 1,
@@ -131,12 +131,13 @@ for (const k of CUE_KEYS) DEFAULTS['cue_' + k] = 'tone';
 
 // ---------------------------------------------------------------- settings
 const LS_KEY = 'cardAssistant.settings.v1';
-const SETTINGS_VER = 13;
+const SETTINGS_VER = 14;
 let S = loadSettings();
 function loadSettings() {
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem(LS_KEY) || '{}'); } catch {}
   if ((saved.v || 1) < SETTINGS_VER) {
+    if ((saved.v || 1) < 14 && (saved.deviceMode === 1 || saved.deviceMode == null)) saved.deviceMode = 4; // 1.14.1: silence everything else while the iPhone voice talks
     // Older versions saved every default as if you had chosen it. Drop anything still equal to an OLD
     // default so the improved defaults apply. Values you really changed are kept.
     if ((saved.v || 1) < 2) {
