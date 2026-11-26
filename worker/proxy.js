@@ -16,6 +16,8 @@
  *   GROQ_API_KEY    (Secret, optional) your key from console.groq.com. When it is set, Groq reads the
  *                             card FIRST and Gemini is only the fallback (Groq busy, failed or timed out).
  *   GROQ_MODEL      (Text, optional) Groq vision model(s), comma-separated, best first
+ *   ANTHROPIC_API_KEY (Secret, optional) your key from platform.claude.com, so Claude can read cards
+ *   CLAUDE_MODEL    (Text, optional) Claude model(s), comma-separated (default claude-opus-5-5)
  *
  * API:
  *   GET  /   -> health check: { ok, hasKey, hasToken, tokenOk }
@@ -26,7 +28,8 @@
  *     Tries each model in turn if one is busy or fails. If a model rejects the
  *     optional settings ("invalid argument"), it retries with basic settings.
  *     returns { text, model, finishReason, geminiMs, usage, attempts }
- *     answerers?: ["groq", "gemini"]  who to ask, in order (default: Groq first if GROQ_API_KEY is set, then Gemini)
+ *     answerers?: ["claude", "groq", "gemini"]  who to ask, in order; anyone without a key is skipped
+ *     claude?: { effort: "low|medium|high|xhigh|max", maxTokens: 16000 }, claudeModels?: ["claude-opus-5-5"]
  *     groqModels?: ["meta-llama/llama-4-scout-17b-16e-instruct"]
  *     groq?: { reasoningEffort: "none|default|low|medium|high", temperature: 0.6, maxTokens: 2548 }
  *       reasoningEffort is only accepted by reasoning models (Qwen 3, GPT-OSS…). If a model refuses it,
@@ -45,7 +48,7 @@
  *     cfModel may be one model or a comma-separated list; retired/missing models are skipped automatically.
  */
 
-const WORKER_VERSION = 10;
+const WORKER_VERSION = 11;
 const DEFAULT_GROQ_MODELS = ['meta-llama/llama-4-scout-17b-16e-instruct', 'meta-llama/llama-4-maverick-17b-128e-instruct'];
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const DEFAULT_MODEL = 'gemini-flash-latest';
@@ -96,6 +99,8 @@ export default {
         ai: !!getAI(env),
         dg: !!env.DEEPGRAM_API_KEY,
         groq: !!env.GROQ_API_KEY,
+        claude: !!env.ANTHROPIC_API_KEY,
+        claudeModels: claudeModelList(env, null),
         groqModels: groqModelList(env, null),
       });
     }
@@ -104,7 +109,7 @@ export default {
     if (!originOk) return json({ error: 'Origin not allowed: ' + origin }, 403);
     if (!env.APP_TOKEN) return json({ error: 'Worker is missing the APP_TOKEN secret' }, 500);
     if (!tokenOk) return json({ error: 'Wrong or missing app token' }, 401);
-    if (!env.GEMINI_API_KEY && !env.GROQ_API_KEY) return json({ error: 'Worker is missing the GEMINI_API_KEY (or GROQ_API_KEY) secret' }, 500);
+    if (!env.GEMINI_API_KEY && !env.GROQ_API_KEY && !env.ANTHROPIC_API_KEY) return json({ error: 'Worker has no answering key: add GEMINI_API_KEY, GROQ_API_KEY or ANTHROPIC_API_KEY' }, 500);
 
     const len = Number(request.headers.get('Content-Length') || 0);
     if (len > MAX_BODY_BYTES) return json({ error: 'Image too large' }, 413);
@@ -147,50 +152,56 @@ export default {
     const t0 = Date.now();
     const attempts = [];
 
-    // Who reads the card, in order. Groq first (fast, generous free tier) when its key is set; Gemini is the fallback.
-    let answerers = Array.isArray(body.answerers) ? body.answerers.map(String).filter((a) => a === 'groq' || a === 'gemini') : ['groq', 'gemini'];
+    // Who reads the card, in the order the app sends (its priority blocks). Anyone without a key here is skipped.
+    const KNOWN = ['claude', 'groq', 'gemini'];
+    let answerers = Array.isArray(body.answerers) ? body.answerers.map(String).filter((a) => KNOWN.includes(a)) : ['groq', 'gemini'];
+    answerers = [...new Set(answerers)];
     if (!answerers.length) answerers = ['groq', 'gemini'];
-    if (!env.GROQ_API_KEY) answerers = answerers.filter((a) => a !== 'groq');
-    if (!env.GEMINI_API_KEY) answerers = answerers.filter((a) => a !== 'gemini');
+    const hasKey = { claude: !!env.ANTHROPIC_API_KEY, groq: !!env.GROQ_API_KEY, gemini: !!env.GEMINI_API_KEY };
+    answerers = answerers.filter((a) => hasKey[a]);
     if (!answerers.length) return json({ error: answersMissing(body.answerers) }, 500);
 
-    if (answerers[0] === 'groq') {
-      // Leave Gemini some time if it is the fallback: Groq gets at most ~60% of the time allowed.
-      const groqDeadline = answerers.includes('gemini') ? t0 + Math.max(2500, timeoutMs * 0.6) : deadline;
-      for (const model of groqModelList(env, body.groqModels)) {
-        const remaining = Math.min(groqDeadline, deadline) - Date.now();
-        if (remaining < 500) break;
-        const r = await callGroq(env.GROQ_API_KEY, model, mimeType, image, prompt, generationConfig, cleanGroqOpts(body.groq), Math.min(groqDeadline, deadline));
-        attempts.push({ model: 'groq:' + model, status: r.status, ms: r.ms, error: r.error || undefined });
-        if (r.ok) return json({ text: r.text, model: 'groq/' + model, engine: 'groq', finishReason: r.finishReason, note: r.note, geminiMs: Date.now() - t0, usage: r.usage, attempts });
-        if (r.status === 401 || r.status === 403) break; // bad key: other Groq models won't help
-      }
-      if (!answerers.includes('gemini')) models.length = 0; // Groq only, and it failed
-    }
+    for (let i = 0; i < answerers.length; i++) {
+      const who = answerers[i], isLast = i === answerers.length - 1;
+      // Leave the next one in line some time: each one but the last gets at most ~60% of what is left.
+      const left = deadline - Date.now();
+      if (left < 500) break;
+      const until = isLast ? deadline : Date.now() + Math.max(2500, left * 0.6);
+      const ok = (text, model, extra = {}) => json({ text, model, engine: who, geminiMs: Date.now() - t0, attempts, ...extra });
 
-    for (const model of (answerers.includes('gemini') ? models : [])) {
-      // Try with the full settings; if Gemini says "invalid argument" (400),
-      // retry once with only the basic settings (some models reject extras).
-      for (const cfg of [generationConfig, basicGenConfig(generationConfig)]) {
-        const remaining = deadline - Date.now();
-        if (remaining < 500) break;
-        const r = await callGemini(env.GEMINI_API_KEY, model, imagePart, prompt, cfg, remaining);
-        attempts.push({ model, status: r.status, ms: r.ms, error: r.error || undefined, simplified: cfg !== generationConfig || undefined });
-        if (r.ok) {
-          return json({
-            text: r.text,
-            model,
-            finishReason: r.finishReason,
-            blockReason: r.blockReason,
-            geminiMs: Date.now() - t0,
-            usage: r.usage,
-            attempts,
-          });
+      if (who === 'claude') {
+        const opts = cleanClaudeOpts(body.claude);
+        for (const model of claudeModelList(env, body.claudeModels)) {
+          if (until - Date.now() < 500) break;
+          const r = await callClaude(env.ANTHROPIC_API_KEY, model, mimeType, image, prompt, opts, until);
+          attempts.push({ model: 'claude:' + model, status: r.status, ms: r.ms, error: r.error || undefined });
+          if (r.ok) return ok(r.text, 'claude/' + model, { finishReason: r.finishReason, usage: r.usage });
+          if (r.status === 401 || r.status === 403) break; // bad key: other models won't help
         }
-        if (r.status === 400 && cfg === generationConfig && JSON.stringify(cfg) !== JSON.stringify(basicGenConfig(cfg))) continue;
-        break; // busy / timeout / other error -> next model
+      } else if (who === 'groq') {
+        for (const model of groqModelList(env, body.groqModels)) {
+          if (until - Date.now() < 500) break;
+          const r = await callGroq(env.GROQ_API_KEY, model, mimeType, image, prompt, generationConfig, cleanGroqOpts(body.groq), until);
+          attempts.push({ model: 'groq:' + model, status: r.status, ms: r.ms, error: r.error || undefined });
+          if (r.ok) return ok(r.text, 'groq/' + model, { finishReason: r.finishReason, note: r.note, usage: r.usage });
+          if (r.status === 401 || r.status === 403) break;
+        }
+      } else {
+        for (const model of models) {
+          // Try with the full settings; if Gemini says "invalid argument" (400),
+          // retry once with only the basic settings (some models reject extras).
+          for (const cfg of [generationConfig, basicGenConfig(generationConfig)]) {
+            const remaining = until - Date.now();
+            if (remaining < 500) break;
+            const r = await callGemini(env.GEMINI_API_KEY, model, imagePart, prompt, cfg, remaining);
+            attempts.push({ model, status: r.status, ms: r.ms, error: r.error || undefined, simplified: cfg !== generationConfig || undefined });
+            if (r.ok) return ok(r.text, model, { finishReason: r.finishReason, blockReason: r.blockReason, usage: r.usage });
+            if (r.status === 400 && cfg === generationConfig && JSON.stringify(cfg) !== JSON.stringify(basicGenConfig(cfg))) continue;
+            break; // busy / timeout / other error -> next model
+          }
+          if (until - Date.now() < 500) break;
+        }
       }
-      if (deadline - Date.now() < 500) break;
     }
 
     const last = attempts[attempts.length - 1] || {};
@@ -205,8 +216,60 @@ export default {
 };
 
 function answersMissing(asked) {
-  return Array.isArray(asked) && asked.length === 1 && asked[0] === 'groq'
-    ? 'Groq is not set up: add a secret named GROQ_API_KEY to this Worker' : 'Worker is missing the GEMINI_API_KEY secret';
+  const names = { claude: 'Claude (ANTHROPIC_API_KEY)', groq: 'Groq (GROQ_API_KEY)', gemini: 'Gemini (GEMINI_API_KEY)' };
+  const list = (Array.isArray(asked) ? asked : ['groq', 'gemini']).map((a) => names[a]).filter(Boolean);
+  return 'None of the answerers you switched on has a key in this Worker: ' + (list.join(', ') || 'none chosen') + '. Add the secret in Cloudflare.';
+}
+// ---- Claude (Anthropic Messages API, called over plain HTTPS: this Worker is one pasted file with no packages)
+const DEFAULT_CLAUDE_MODELS = ['claude-opus-5-5'];
+const CLAUDE_URL = 'https://api.anthropic.com/v1/messages';
+function claudeModelList(env, asked) {
+  const list = Array.isArray(asked) && asked.length ? asked : String(env.CLAUDE_MODEL || '').split(',');
+  const out = list.map((m) => String(m || '').trim()).filter((m) => /^claude-[a-z0-9.\-]{1,60}$/i.test(m)).slice(0, 3);
+  return out.length ? out : DEFAULT_CLAUDE_MODELS;
+}
+function cleanClaudeOpts(o) {
+  const out = { effort: 'medium', maxTokens: 16000 };
+  if (!o || typeof o !== 'object') return out;
+  if (typeof o.effort === 'string' && /^(low|medium|high|xhigh|max)$/.test(o.effort)) out.effort = o.effort;
+  if (typeof o.maxTokens === 'number' && isFinite(o.maxTokens)) out.maxTokens = clamp(Math.round(o.maxTokens), 1024, 32000);
+  return out;
+}
+async function callClaude(key, model, mimeType, image, prompt, opts, deadline) {
+  const t0 = Date.now();
+  const timeoutMs = deadline - t0;
+  if (timeoutMs < 500) return { ok: false, status: 504, error: 'Claude timed out', ms: 0 };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(CLAUDE_URL, {
+      method: 'POST', signal: ctrl.signal,
+      headers: {
+        'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2026-10-21',
+        'anthropic-beta': 'server-side-fallback-2026-07-01', // if Claude declines the request, the API retries it on another model
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: opts.maxTokens,
+        output_config: { effort: opts.effort }, // how hard it thinks (thinking is always on for current models)
+        fallbacks: 'default',
+        messages: [{ role: 'user', content: [
+          { type: 'image', source: { type: 'base64', media_type: mimeType, data: image } },
+          { type: 'text', text: prompt },
+        ] }],
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    const ms = Date.now() - t0;
+    if (!res.ok) return { ok: false, status: res.status, error: 'Claude: ' + ((data.error && data.error.message) || 'HTTP ' + res.status), ms };
+    if (data.stop_reason === 'refusal') return { ok: false, status: 422, error: 'Claude declined this card', ms };
+    const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+    if (!text) return { ok: false, status: 502, error: 'Claude: empty reply (' + (data.stop_reason || '?') + ')', ms };
+    return { ok: true, status: 200, ms, text, finishReason: data.stop_reason || null, usage: data.usage || null };
+  } catch (e) {
+    const timedOut = e && e.name === 'AbortError';
+    return { ok: false, status: timedOut ? 504 : 0, error: timedOut ? 'Claude timed out' : 'Could not reach Claude', ms: Date.now() - t0 };
+  } finally { clearTimeout(timer); }
 }
 function groqModelList(env, asked) {
   const list = Array.isArray(asked) && asked.length ? asked : String(env.GROQ_MODEL || '').split(',');

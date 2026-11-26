@@ -96,6 +96,24 @@
   table.keys { width:100%; border-collapse:collapse; margin-top:8px; font-size:14px; }
   table.keys td { padding:6px 4px; border-top:1px solid var(--line); vertical-align:top; } table.keys td:first-child { white-space:nowrap; }
   kbd { background:#000; border:1px solid var(--line); border-radius:5px; padding:1px 6px; font:12px ui-monospace, Menlo, monospace; }
+  #answerBlocks { margin-top:10px; display:flex; flex-direction:column; gap:8px; }
+  .ablock { background:var(--bg); border:1px solid var(--line); border-radius:14px; padding:10px 12px; transition:opacity .2s; }
+  .ablock.first { border-color:var(--acc); box-shadow:0 0 0 1px var(--acc) inset; }
+  .ablock.off { opacity:.45; }
+  .ahead2 { display:flex; align-items:center; gap:8px; }
+  .anum { flex:0 0 26px; height:26px; border-radius:50%; background:var(--card2); color:var(--fg); font-weight:700; font-size:14px; display:flex; align-items:center; justify-content:center; }
+  .ablock.first .anum { background:var(--acc); color:#000; }
+  .aname { flex:1; text-align:left; background:none; border:0; color:var(--fg); font-size:17px; font-weight:700; padding:6px 0; margin:0; }
+  .akey { font-size:12px; font-weight:500; color:var(--mut); margin-left:6px; }
+  .akey.ok { color:var(--ok); } .akey.no { color:var(--warn); }
+  .amove button { margin:0 0 0 4px; padding:6px 10px; font-size:13px; border-radius:8px; background:var(--card2); color:var(--fg); }
+  .amove button:disabled { opacity:.25; }
+  .aswitch { position:relative; width:46px; height:28px; flex:0 0 46px; margin:0 0 0 4px; }
+  .aswitch input { opacity:0; width:0; height:0; position:absolute; }
+  .aswitch i { position:absolute; inset:0; border-radius:14px; background:#3a3a3c; transition:background .2s; }
+  .aswitch i::after { content:""; position:absolute; left:3px; top:3px; width:22px; height:22px; border-radius:50%; background:#fff; transition:transform .2s; }
+  .aswitch input:checked + i { background:var(--ok); } .aswitch input:checked + i::after { transform:translateX(18px); }
+  .abody { margin-top:6px; border-top:1px solid var(--line); padding-top:4px; }
   [hidden] { display:none !important; }
   #frozenShot { position:absolute; inset:0; width:100%; height:100%; z-index:1; }
   #cropBox { z-index:2; }
@@ -199,57 +217,87 @@
 </details>
 
 <details>
-  <summary>Who reads the card (Groq, Gemini)</summary>
-  <label>Answer with</label>
-  <select data-k="answerer">
-    <option value="groq">Groq first, Gemini as the fallback (default)</option>
-    <option value="gemini">Gemini only</option>
-    <option value="groqOnly">Groq only (no fallback)</option>
-  </select>
-  <div class="hint">Groq needs a <b>GROQ_API_KEY</b> secret in the Worker and Worker v9 (see the README, "Groq"). Until it has one, Gemini answers on its own — nothing breaks.</div>
-  <label>Groq models (comma-separated, blank = Worker default)</label>
-  <input type="text" data-k="groqModels" placeholder="meta-llama/llama-4-scout-17b-16e-instruct" autocapitalize="off" autocorrect="off">
-  <div class="row">
-    <div><label>Groq reasoning effort</label>
-      <select data-k="groqReasoning">
-        <option value="">Don't send</option>
-        <option value="none">None</option>
-        <option value="default">Default (Qwen)</option>
-        <option value="low">Low</option>
-        <option value="medium">Medium (default)</option>
-        <option value="high">High (slowest)</option>
-      </select></div>
-    <div><label>Groq temperature (0–2)</label><input type="number" data-k="groqTemp" min="0" max="2" step="0.1"></div>
-    <div><label>Groq max answer tokens</label><input type="number" data-k="groqMaxTokens" min="64" max="8192" step="64"></div>
+  <summary>Who reads the card (Claude, Groq, Gemini)</summary>
+  <div class="hint">Top block answers first. If it's off, has no key in the Worker, fails or runs slow, the next one takes over. Use ▲ ▼ to change the order, the switch to turn one off, and tap a name for its settings.</div>
+  <div id="answerBlocks">
+    <div class="ablock" data-who="claude">
+      <div class="ahead2"><span class="anum"></span><button class="aname" type="button">Claude <span class="akey"></span></button>
+        <span class="amove"><button type="button" class="aup" aria-label="Move up">▲</button><button type="button" class="adown" aria-label="Move down">▼</button></span>
+        <label class="aswitch"><input type="checkbox" class="aon"><i></i></label></div>
+      <div class="abody" hidden>
+        <label>Claude model(s), comma-separated (blank = claude-opus-5-5)</label>
+        <input type="text" data-k="claudeModels" placeholder="claude-opus-5-5" autocapitalize="off" autocorrect="off">
+        <div class="row">
+          <div><label>Effort (how hard it thinks)</label>
+            <select data-k="claudeEffort">
+              <option value="low">Low (fastest)</option>
+              <option value="medium">Medium (default)</option>
+              <option value="high">High</option>
+              <option value="xhigh">Extra high (slow)</option>
+              <option value="max">Max (slowest)</option>
+            </select></div>
+          <div><label>Max answer tokens</label><input type="number" data-k="claudeMaxTokens" min="1024" max="32000" step="512"></div>
+        </div>
+        <div class="hint">Needs an <b>ANTHROPIC_API_KEY</b> secret in the Worker (README, "Claude"). Claude always thinks before answering; effort sets how much. Thinking counts toward max tokens, so keep it high. Temperature isn't adjustable on current Claude models. Paid per use: a card costs roughly a few cents.</div>
+      </div>
+    </div>
+    <div class="ablock" data-who="groq">
+      <div class="ahead2"><span class="anum"></span><button class="aname" type="button">Groq <span class="akey"></span></button>
+        <span class="amove"><button type="button" class="aup" aria-label="Move up">▲</button><button type="button" class="adown" aria-label="Move down">▼</button></span>
+        <label class="aswitch"><input type="checkbox" class="aon"><i></i></label></div>
+      <div class="abody" hidden>
+        <label>Groq models (comma-separated, blank = Worker default)</label>
+        <input type="text" data-k="groqModels" placeholder="meta-llama/llama-4-scout-17b-16e-instruct" autocapitalize="off" autocorrect="off">
+        <div class="row">
+          <div><label>Reasoning effort</label>
+            <select data-k="groqReasoning">
+              <option value="">Don't send</option>
+              <option value="none">None</option>
+              <option value="default">Default (Qwen)</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium (default)</option>
+              <option value="high">High (slowest)</option>
+            </select></div>
+          <div><label>Temperature (0–2)</label><input type="number" data-k="groqTemp" min="0" max="2" step="0.1"></div>
+          <div><label>Max answer tokens</label><input type="number" data-k="groqMaxTokens" min="64" max="8192" step="64"></div>
+        </div>
+        <div class="hint">Needs a <b>GROQ_API_KEY</b> secret. Reasoning only works on reasoning models (Qwen 3, GPT-OSS); others are asked again without it, automatically. The model must be able to see images.</div>
+      </div>
+    </div>
+    <div class="ablock" data-who="gemini">
+      <div class="ahead2"><span class="anum"></span><button class="aname" type="button">Gemini <span class="akey"></span></button>
+        <span class="amove"><button type="button" class="aup" aria-label="Move up">▲</button><button type="button" class="adown" aria-label="Move down">▼</button></span>
+        <label class="aswitch"><input type="checkbox" class="aon"><i></i></label></div>
+      <div class="abody" hidden>
+        <label>Models to try, in order (comma-separated)</label>
+        <input type="text" data-k="models" autocapitalize="off" autocorrect="off">
+        <div class="row">
+          <div><label>Image detail</label>
+            <select data-k="mediaResolution">
+              <option value="">Default</option>
+              <option value="MEDIA_RESOLUTION_HIGH">High</option>
+              <option value="MEDIA_RESOLUTION_MEDIUM">Medium</option>
+              <option value="MEDIA_RESOLUTION_LOW">Low</option>
+            </select></div>
+          <div><label>Speed (thinking)</label>
+            <select data-k="thinking">
+              <option value="">Model default</option>
+              <option value="budget0">Off (2.5-style models)</option>
+              <option value="minimal">Minimal (3.x models)</option>
+              <option value="low">Low (3.x models)</option>
+              <option value="medium">Medium (3.x models)</option>
+              <option value="high">High (3.x models, slowest)</option>
+            </select></div>
+        </div>
+        <div class="row">
+          <div><label>Temperature (0–2)</label><input type="number" data-k="geminiTemp" min="0" max="2" step="0.1"></div>
+          <div><label>Max answer tokens</label><input type="number" data-k="maxTokens" min="256" max="4096" step="64"></div>
+        </div>
+        <div class="hint">Needs a <b>GEMINI_API_KEY</b> secret. If a model rejects these settings, the Worker quietly retries without them.</div>
+      </div>
+    </div>
   </div>
-  <div class="hint">Reasoning only works on reasoning models (Qwen 3: <i>none</i> or <i>default</i>; GPT-OSS: <i>low / medium / high</i>). A model that doesn't take it is asked again without it, automatically. Its thinking is never read out, only the answer. More reasoning = smarter but slower; watch the time limit below.</div>
-  <h2 style="margin-top:16px">Gemini (fallback)</h2>
-  <label>Models to try, in order (comma-separated)</label>
-  <input type="text" data-k="models" autocapitalize="off" autocorrect="off">
-  <div class="hint">If the first is busy or fails, the next one is tried automatically.</div>
-  <div class="row">
-    <div><label>Image detail</label>
-      <select data-k="mediaResolution">
-        <option value="">Default</option>
-        <option value="MEDIA_RESOLUTION_HIGH">High</option>
-        <option value="MEDIA_RESOLUTION_MEDIUM">Medium</option>
-        <option value="MEDIA_RESOLUTION_LOW">Low</option>
-      </select></div>
-    <div><label>Speed (thinking)</label>
-      <select data-k="thinking">
-        <option value="">Model default</option>
-        <option value="budget0">Off (2.5-style models)</option>
-        <option value="minimal">Minimal (3.x models)</option>
-        <option value="low">Low (3.x models)</option>
-        <option value="medium">Medium (3.x models)</option>
-        <option value="high">High (3.x models, slowest)</option>
-      </select></div>
-  </div>
-  <div class="row">
-    <div><label>Gemini temperature (0–2)</label><input type="number" data-k="geminiTemp" min="0" max="2" step="0.1"></div>
-    <div><label>Gemini max answer tokens</label><input type="number" data-k="maxTokens" min="256" max="4096" step="64"></div>
-  </div>
-  <div class="hint">If a model rejects these, the Worker quietly retries without them.</div>
+  <div class="hint" id="answerSummary"></div>
   <label>What should it do with the card?</label>
   <select id="promptPreset">
     <option value="anything">Anything — respond to whatever is on the card (default)</option>

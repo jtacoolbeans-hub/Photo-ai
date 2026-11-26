@@ -98,6 +98,33 @@ A model that refuses it, like Llama 4 Scout, is asked again without it, so nothi
 is never read out. Higher reasoning is smarter but slower, so raise **Timeout & stall line → Speak the stall line after** if answers
 start arriving late. The model must be able to **see images**: a text-only model fails, and Gemini answers instead.
 
+### Step 3c (optional, for testing): Claude reads the card
+
+From version 1.17, **Settings → Who reads the card** is a list of blocks: **Claude, Groq, Gemini**. The top
+block that is switched on (and has a key) answers first; if it fails, declines or runs slow, the next one takes
+over. Use **▲ ▼** to reorder, the switch to turn one off, and tap a name for its settings. Your old choice
+was kept (Gemini-only stays Groq-off, etc.); Claude was added at the top so you can test it.
+
+1. On your iPhone, go to **platform.claude.com** and sign up / sign in.
+2. Add a little credit: **Settings → Billing** (Claude's API is pay-as-you-go; a card costs a few cents
+   at Medium effort). Optional but wise: **Settings → Limits** and set a low monthly spend limit.
+3. **API Keys → Create Key**, name it `card-proxy`, and **copy** it (it starts with `sk-ant-`). It's shown
+   only once: paste it into Notes for a minute.
+4. Update the Worker code: repeat **Step 3**, items 1–5 (paste the newest `worker/proxy.js`, **Deploy**).
+   It must be **version 11** or newer.
+5. In the Worker: **Settings → Variables and Secrets → Add** → Type **Secret**, name `ANTHROPIC_API_KEY`
+   (exactly that), value = the `sk-ant-…` key. **Deploy / Save**. Delete the key from Notes.
+6. Optional: Type **Text**, name `CLAUDE_MODEL`, to change the model (default `claude-opus-5-5`).
+   You can also type models in the Claude block in the app.
+7. In the app, **Test connection** should show **✅ Claude key stored** and **➜ Answer order: Claude → …**.
+   After a scan, the capture log shows `claude/claude-opus-5-5` when Claude answered.
+
+**Claude settings:** **Effort** (Low → Max) is how hard it thinks; Medium is the default. Low is fastest
+for a live show. Claude always thinks a little first, so it's usually slower to answer than Groq: if the stall
+line plays too often, use Low effort, raise **Timeout & stall line → Speak the stall line after**, or move
+Groq to the top. If Claude declines a card, the Worker automatically moves to the next block (and Claude's own
+backup model is tried first). **Max answer tokens** includes its thinking, so leave it at 16000.
+
 ### Step 4: Turn on GitHub Pages
 
 1. On github.com, open this repo → **Settings** → **Pages**.

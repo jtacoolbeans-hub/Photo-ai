@@ -14,9 +14,9 @@
  */
 'use strict';
 
-const APP_VERSION = '1.16.0';
+const APP_VERSION = '1.17.0';
 const MIN_WORKER_VERSION = 5;
-const RECOMMENDED_WORKER_VERSION = 9; // 9 = Groq reads the card first, Gemini as the fallback
+const RECOMMENDED_WORKER_VERSION = 11; // 11 = Claude, Groq and Gemini in the order you choose
 
 // The first version of the prompt. Phones that saved it get the new one automatically.
 const OLD_PROMPT_V1 =
@@ -111,6 +111,8 @@ const CUE_KEYS = ['start', 'ready', 'disarmed', 'captured', 'thinking', 'answer'
 
 const DEFAULTS = {
   workerUrl: '', token: '',
+  answerOrder: ['claude', 'groq', 'gemini'], answerOn: { claude: true, groq: true, gemini: true }, // priority blocks: top answers first
+  claudeModels: '', claudeEffort: 'medium', claudeMaxTokens: 16000,
   answerer: 'groq', groqModels: '', groqReasoning: 'medium', groqTemp: 0.6, groqMaxTokens: 2548, geminiTemp: 0, // Groq first (if the Worker has GROQ_API_KEY), Gemini as the fallback
   models: 'gemini-3.5-flash, gemini-flash-latest',
   mediaResolution: 'MEDIA_RESOLUTION_HIGH', thinking: 'minimal', maxTokens: 2048,
@@ -163,7 +165,15 @@ function loadSettings() {
     saved.v = SETTINGS_VER;
     try { localStorage.setItem(LS_KEY, JSON.stringify(saved)); } catch {}
   }
-  return { ...DEFAULTS, ...saved, v: SETTINGS_VER, crop: { ...DEFAULTS.crop, ...(saved.crop || {}) }, binds: { ...(saved.binds || {}) } };
+  if (!Array.isArray(saved.answerOrder)) { // 1.17: the old "Answer with" choice becomes priority blocks (Claude added on top for testing)
+    saved.answerOrder = ['claude', 'groq', 'gemini'];
+    saved.answerOn = { claude: true, groq: saved.answerer !== 'gemini', gemini: saved.answerer !== 'groqOnly' };
+  }
+  const order = saved.answerOrder.filter((w) => DEFAULTS.answerOrder.includes(w));
+  for (const w of DEFAULTS.answerOrder) if (!order.includes(w)) order.push(w); // a new answerer added later goes at the bottom
+  saved.answerOrder = order;
+  return { ...DEFAULTS, ...saved, v: SETTINGS_VER, crop: { ...DEFAULTS.crop, ...(saved.crop || {}) }, binds: { ...(saved.binds || {}) },
+           answerOn: { ...DEFAULTS.answerOn, ...(saved.answerOn || {}) } };
 }
 function saveSettings() { try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch {} }
 
@@ -554,7 +564,8 @@ async function checkWorker() {
   if ((workerInfo.version || 1) < MIN_WORKER_VERSION) engineDown.cf = 'Worker is out of date — paste the new proxy.js into Cloudflare';
   else if (!workerInfo.ai) engineDown.cf = 'not connected — add a Workers AI binding to the Worker';
   else engineDown.cf = '';
-  sev('Worker v' + (workerInfo.version || '?') + (workerInfo.ai ? ', Cloudflare voice connected' : ', no Cloudflare voice') + (workerInfo.dg ? ', Deepgram voice set up' : '') + (workerInfo.groq ? ', Groq answers first' : ', no Groq key (Gemini answers)'));
+  sev('Worker v' + (workerInfo.version || '?') + (workerInfo.ai ? ', Cloudflare voice connected' : ', no Cloudflare voice') + (workerInfo.dg ? ', Deepgram voice set up' : '') + ', answers: ' + (answerers().filter((w) => workerInfo[w === 'gemini' ? 'hasKey' : w]).join(' → ') || 'nobody has a key!'));
+  renderAnswerBlocks();
   setSub();
   return workerInfo;
 }
@@ -1567,13 +1578,15 @@ function itemTexts(items) { // exactly what gets spoken, in order
 }
 function speakItems(items) { itemTexts(items).forEach((t) => speak(t)); return speechChain; }
 
-function answerers() { return S.answerer === 'gemini' ? ['gemini'] : S.answerer === 'groqOnly' ? ['groq'] : ['groq', 'gemini']; }
+function answerers() { return S.answerOrder.filter((w) => S.answerOn[w]); }
 async function callWorker(dataUrl, timeoutMs, outer) {
   if (!S.workerUrl) return { ok: false, error: 'No Worker URL set' };
   const models = String(S.models || '').split(',').map((m) => m.trim()).filter(Boolean);
   const generationConfig = { temperature: Math.min(2, Math.max(0, +S.geminiTemp || 0)), maxOutputTokens: Math.max(256, +S.maxTokens || 1024) };
   const groq = { temperature: Math.min(2, Math.max(0, +S.groqTemp || 0)), maxTokens: Math.max(64, Math.min(8192, +S.groqMaxTokens || 2548)) };
   if (S.groqReasoning) groq.reasoningEffort = S.groqReasoning;
+  const claude = { effort: S.claudeEffort || 'medium', maxTokens: Math.max(1024, Math.min(32000, +S.claudeMaxTokens || 16000)) };
+  const claudeModels = String(S.claudeModels || '').split(',').map((m) => m.trim()).filter(Boolean);
   if (S.mediaResolution) generationConfig.mediaResolution = S.mediaResolution;
   if (S.thinking === 'budget0') generationConfig.thinkingConfig = { thinkingBudget: 0 };
   else if (S.thinking) generationConfig.thinkingConfig = { thinkingLevel: S.thinking };
@@ -1585,7 +1598,7 @@ async function callWorker(dataUrl, timeoutMs, outer) {
     const r = await fetch(S.workerUrl.trim().replace(/\/$/, ''), {
       method: 'POST', signal: ctrl.signal,
       headers: { 'Content-Type': 'application/json', 'X-App-Token': S.token.trim() },
-      body: JSON.stringify({ image: dataUrl, prompt: S.prompt + (S.allItems ? '' : '\n\nOnly handle the FIRST item on the card, nearest the top.') + (S.style && S.style.trim() ? '\n\nExtra instructions from the performer: ' + S.style.trim() : ''), models, generationConfig, timeoutMs, answerers: answerers(), groq, ...(groqModels.length ? { groqModels } : {}) }),
+      body: JSON.stringify({ image: dataUrl, prompt: S.prompt + (S.allItems ? '' : '\n\nOnly handle the FIRST item on the card, nearest the top.') + (S.style && S.style.trim() ? '\n\nExtra instructions from the performer: ' + S.style.trim() : ''), models, generationConfig, timeoutMs, answerers: answerers(), groq, claude, ...(claudeModels.length ? { claudeModels } : {}), ...(groqModels.length ? { groqModels } : {}) }),
     });
     const j = await r.json().catch(() => ({ error: 'Bad reply from Worker (HTTP ' + r.status + ')' }));
     return { ...j, ok: r.ok && !j.error };
@@ -1884,12 +1897,14 @@ $('btnTestConn').onclick = async () => {
   try {
     const j = await (await fetch(S.workerUrl.trim().replace(/\/$/, ''), { headers: { 'X-App-Token': S.token.trim() } })).json();
     const lines = [
-      (j.hasKey ? '✅' : (j.groq ? 'ℹ' : '❌')) + ' Gemini key stored in Worker' + (j.hasKey ? '' : j.groq ? ' (no fallback if Groq fails)' : ''),
+      (j.hasKey ? '✅' : (j.groq || j.claude ? 'ℹ' : '❌')) + ' Gemini key stored in Worker',
       (j.tokenOk ? '✅' : '❌') + ' App token matches',
       (j.originOk ? '✅' : '❌') + ' This page is allowed',
       ((j.version || 1) >= MIN_WORKER_VERSION ? '✅ Worker is up to date' : '❌ Worker is OUT OF DATE — paste the new worker/proxy.js into Cloudflare'),
       ((j.version || 1) < MIN_WORKER_VERSION ? '❌ Cloudflare voice needs the new Worker code first' : j.ai ? '✅ Cloudflare voice connected' : '❌ Cloudflare voice not connected — add a Workers AI binding (see README)'),
-      ((j.version || 1) < 9 ? '❌ Groq needs the newest Worker code (proxy.js v9) — Gemini answers until then' : j.groq ? '✅ Groq key stored — Groq answers first, Gemini is the fallback' : 'ℹ Groq not set up (add a GROQ_API_KEY secret, see README) — Gemini answers'),
+      ((j.version || 1) < 11 ? '❌ Claude needs the newest Worker code (proxy.js v11) — paste it into Cloudflare' : j.claude ? '✅ Claude key stored' : 'ℹ Claude not set up (add an ANTHROPIC_API_KEY secret, see README)'),
+      ((j.version || 1) < 9 ? '❌ Groq needs the newest Worker code' : j.groq ? '✅ Groq key stored' : 'ℹ Groq not set up (add a GROQ_API_KEY secret, see README)'),
+      '➜ Answer order: ' + (answerers().map((w) => ({ claude: 'Claude', groq: 'Groq', gemini: 'Gemini' })[w] + (({ claude: j.claude, groq: j.groq, gemini: j.hasKey })[w] ? '' : ' (no key, skipped)')).join(' → ') || 'everything is switched off!'),
       (j.dg ? '✅ Deepgram voice set up' : (j.version || 1) >= 8 ? 'ℹ Deepgram voice not set up (optional, free credit: see the README)' : ''),
       ((j.version || 1) >= MIN_WORKER_VERSION && (j.version || 1) < RECOMMENDED_WORKER_VERSION ? '⚠ Worker v' + j.version + ' — paste the newest proxy.js (Deepgram voice, cheaper Cloudflare voice, more Gemini voice models)' : ''),
     ];
@@ -2088,7 +2103,48 @@ $('speedPreset').addEventListener('change', () => {
   saveSettings();
 });
 
+// ---------------------------------------------------------------- who reads the card: priority blocks
+const ANSWER_NAMES = { claude: 'Claude', groq: 'Groq', gemini: 'Gemini' };
+function renderAnswerBlocks() {
+  const box = $('answerBlocks'); if (!box) return;
+  const keyOf = (w) => (workerInfo ? !!workerInfo[w === 'gemini' ? 'hasKey' : w] : null);
+  const order = S.answerOrder, firstOn = order.find((w) => S.answerOn[w] && keyOf(w) !== false); // who will really answer first
+  order.forEach((w, i) => {
+    const b = box.querySelector('[data-who="' + w + '"]'); if (!b) return;
+    box.appendChild(b); // DOM order follows the saved order
+    b.querySelector('.anum').textContent = i + 1;
+    b.querySelector('.aup').disabled = i === 0;
+    b.querySelector('.adown').disabled = i === order.length - 1;
+    b.querySelector('.aon').checked = !!S.answerOn[w];
+    b.classList.toggle('off', !S.answerOn[w]);
+    b.classList.toggle('first', w === firstOn);
+    const k = b.querySelector('.akey');
+    const has = keyOf(w);
+    k.textContent = has == null ? '' : has ? '● key set' : '● no key';
+    k.className = 'akey' + (has == null ? '' : has ? ' ok' : ' no');
+  });
+  const on = answerers();
+  $('answerSummary').textContent = on.length ? 'Order now: ' + on.map((w) => ANSWER_NAMES[w] + (keyOf(w) === false ? ' (no key, skipped)' : '')).join(' → ') : '⚠ Everything is switched off: cards can\'t be read.';
+}
+function wireAnswerBlocks() {
+  const box = $('answerBlocks'); if (!box) return;
+  box.querySelectorAll('.ablock').forEach((b) => {
+    const w = b.dataset.who;
+    const move = (d) => {
+      const o = S.answerOrder.slice(), i = o.indexOf(w), j = i + d;
+      if (j < 0 || j >= o.length) return;
+      [o[i], o[j]] = [o[j], o[i]]; S.answerOrder = o; saveSettings(); renderAnswerBlocks();
+    };
+    b.querySelector('.aup').onclick = () => move(-1);
+    b.querySelector('.adown').onclick = () => move(1);
+    b.querySelector('.aon').onchange = (e) => { S.answerOn = { ...S.answerOn, [w]: e.target.checked }; saveSettings(); renderAnswerBlocks(); };
+    b.querySelector('.aname').onclick = () => { const body = b.querySelector('.abody'); body.hidden = !body.hidden; };
+  });
+  renderAnswerBlocks();
+}
+
 function init() {
+  wireAnswerBlocks();
   buildCueSettings();
   buildBindUI();
   updateSpeechInfo();
