@@ -28,6 +28,9 @@
  *     returns { text, model, finishReason, geminiMs, usage, attempts }
  *     answerers?: ["groq", "gemini"]  who to ask, in order (default: Groq first if GROQ_API_KEY is set, then Gemini)
  *     groqModels?: ["meta-llama/llama-4-scout-17b-16e-instruct"]
+ *     groq?: { reasoningEffort: "none|default|low|medium|high", temperature: 0.6, maxTokens: 2548 }
+ *       reasoningEffort is only accepted by reasoning models (Qwen 3, GPT-OSS…). If a model refuses it,
+ *       the Worker retries once without it. Thinking text is never returned, only the answer.
  *   POST / with { tts: "words to say", voice?: "Kore", model?: "...", stream?: true }
  *     stream: true -> raw 16-bit PCM (audio/L16) sent piece by piece as Gemini makes it,
  *     so the phone can start playing almost at once. Falls back to a whole WAV file.
@@ -42,7 +45,7 @@
  *     cfModel may be one model or a comma-separated list; retired/missing models are skipped automatically.
  */
 
-const WORKER_VERSION = 9;
+const WORKER_VERSION = 10;
 const DEFAULT_GROQ_MODELS = ['meta-llama/llama-4-scout-17b-16e-instruct', 'meta-llama/llama-4-maverick-17b-128e-instruct'];
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const DEFAULT_MODEL = 'gemini-flash-latest';
@@ -157,9 +160,9 @@ export default {
       for (const model of groqModelList(env, body.groqModels)) {
         const remaining = Math.min(groqDeadline, deadline) - Date.now();
         if (remaining < 500) break;
-        const r = await callGroq(env.GROQ_API_KEY, model, mimeType, image, prompt, generationConfig, remaining);
+        const r = await callGroq(env.GROQ_API_KEY, model, mimeType, image, prompt, generationConfig, cleanGroqOpts(body.groq), Math.min(groqDeadline, deadline));
         attempts.push({ model: 'groq:' + model, status: r.status, ms: r.ms, error: r.error || undefined });
-        if (r.ok) return json({ text: r.text, model: 'groq/' + model, engine: 'groq', finishReason: r.finishReason, geminiMs: Date.now() - t0, usage: r.usage, attempts });
+        if (r.ok) return json({ text: r.text, model: 'groq/' + model, engine: 'groq', finishReason: r.finishReason, note: r.note, geminiMs: Date.now() - t0, usage: r.usage, attempts });
         if (r.status === 401 || r.status === 403) break; // bad key: other Groq models won't help
       }
       if (!answerers.includes('gemini')) models.length = 0; // Groq only, and it failed
@@ -210,30 +213,58 @@ function groqModelList(env, asked) {
   const out = list.map((m) => String(m || '').trim()).filter((m) => /^[a-z0-9][a-z0-9.\-_\/]{1,100}$/i.test(m)).slice(0, 3);
   return out.length ? out : DEFAULT_GROQ_MODELS;
 }
+// Only the Groq settings we understand.
+function cleanGroqOpts(o) {
+  const out = {};
+  if (!o || typeof o !== 'object') return out;
+  if (typeof o.reasoningEffort === 'string' && /^(none|default|low|medium|high)$/.test(o.reasoningEffort)) out.reasoningEffort = o.reasoningEffort;
+  if (typeof o.temperature === 'number' && isFinite(o.temperature)) out.temperature = clamp(o.temperature, 0, 2);
+  if (typeof o.maxTokens === 'number' && isFinite(o.maxTokens)) out.maxTokens = clamp(Math.round(o.maxTokens), 64, 8192);
+  return out;
+}
 // Groq (OpenAI-style chat API) with the photo attached. Groq accepts base64 photos up to 4 MB.
-async function callGroq(key, model, mimeType, image, prompt, generationConfig, timeoutMs) {
+async function callGroq(key, model, mimeType, image, prompt, generationConfig, opts, deadline) {
+  const t0 = Date.now();
+  const base = {
+    model,
+    messages: [{ role: 'user', content: [
+      { type: 'text', text: prompt },
+      { type: 'image_url', image_url: { url: 'data:' + mimeType + ';base64,' + image } },
+    ] }],
+    temperature: opts.temperature != null ? opts.temperature : (generationConfig.temperature || 0),
+    max_completion_tokens: opts.maxTokens || Math.min(8192, generationConfig.maxOutputTokens || 1024),
+    stream: false,
+  };
+  const withReasoning = { ...base };
+  if (opts.reasoningEffort) {
+    // Qwen 3 only knows "none" / "default": low / medium / high mean "think" there
+    withReasoning.reasoning_effort = /qwen/i.test(model) && /^(low|medium|high)$/.test(opts.reasoningEffort) ? 'default' : opts.reasoningEffort;
+    // keep the model's thinking out of the answer (GPT-OSS takes include_reasoning, others reasoning_format)
+    if (/gpt-oss/i.test(model)) withReasoning.include_reasoning = false; else withReasoning.reasoning_format = 'hidden';
+  }
+  let r = await groqOnce(key, withReasoning, deadline - Date.now());
+  if (!r.ok && r.status === 400 && opts.reasoningEffort && /reason/i.test(r.error)) {
+    r = await groqOnce(key, base, deadline - Date.now()); // this model doesn't do reasoning settings: ask without them
+    if (r.ok) r.note = 'reasoning settings not supported by ' + model;
+  }
+  r.ms = Date.now() - t0;
+  return r;
+}
+async function groqOnce(key, payload, timeoutMs) {
+  if (timeoutMs < 500) return { ok: false, status: 504, error: 'Groq timed out' };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  const t0 = Date.now();
   try {
     const res = await fetch(GROQ_URL, {
       method: 'POST', signal: ctrl.signal,
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: [
-          { type: 'text', text: prompt },
-          { type: 'image_url', image_url: { url: 'data:' + mimeType + ';base64,' + image } },
-        ] }],
-        temperature: generationConfig.temperature || 0,
-        max_completion_tokens: Math.min(8192, generationConfig.maxOutputTokens || 1024),
-      }),
+      body: JSON.stringify(payload),
     });
     const data = await res.json().catch(() => ({}));
-    const ms = Date.now() - t0;
+    const ms = 0;
     if (!res.ok) return { ok: false, status: res.status, error: 'Groq: ' + ((data.error && data.error.message) || 'HTTP ' + res.status), ms };
     const ch = (data.choices || [])[0] || {};
-    const text = String((ch.message && ch.message.content) || '').trim();
+    const text = String((ch.message && ch.message.content) || '').replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/^[\s\S]*<\/think>/i, '').trim();
     if (!text) return { ok: false, status: 502, error: 'Groq: empty reply', ms };
     return { ok: true, status: 200, ms, text, finishReason: ch.finish_reason || null, usage: data.usage || null };
   } catch (e) {

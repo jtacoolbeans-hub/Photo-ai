@@ -90,6 +90,14 @@ if Groq is busy, fails or is slow. Until you add a Groq key, Gemini keeps answer
    *Gemini only*, or *Groq only*. Groq gets at most about 60% of the time limit, so Gemini still has
    time to answer if Groq stalls. The capture log shows which one answered (`groq/…` or a Gemini model).
 
+**Answer settings (version 1.16, Worker v10).** Under **Who reads the card** you can set Groq's
+**reasoning effort** (default *medium*), **temperature** (default 0.6) and **max answer tokens** (default 2548),
+and Gemini's **thinking**, **temperature** and **max answer tokens**. Reasoning is only accepted by reasoning
+models (Qwen 3 uses *none*/*default*, so low/medium/high are sent to it as *default*; GPT-OSS uses low/medium/high).
+A model that refuses it, like Llama 4 Scout, is asked again without it, so nothing fails. The model's thinking
+is never read out. Higher reasoning is smarter but slower, so raise **Seconds before the stall line** if answers
+start arriving late. The model must be able to **see images**: a text-only model fails, and Gemini answers instead.
+
 ### Step 4: Turn on GitHub Pages
 
 1. On github.com, open this repo → **Settings** → **Pages**.

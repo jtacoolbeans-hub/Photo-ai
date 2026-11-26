@@ -209,6 +209,20 @@
   <div class="hint">Groq needs a <b>GROQ_API_KEY</b> secret in the Worker and Worker v9 (see the README, "Groq"). Until it has one, Gemini answers on its own — nothing breaks.</div>
   <label>Groq models (comma-separated, blank = Worker default)</label>
   <input type="text" data-k="groqModels" placeholder="meta-llama/llama-4-scout-17b-16e-instruct" autocapitalize="off" autocorrect="off">
+  <div class="row">
+    <div><label>Groq reasoning effort</label>
+      <select data-k="groqReasoning">
+        <option value="">Don't send</option>
+        <option value="none">None</option>
+        <option value="default">Default (Qwen)</option>
+        <option value="low">Low</option>
+        <option value="medium">Medium (default)</option>
+        <option value="high">High (slowest)</option>
+      </select></div>
+    <div><label>Groq temperature (0–2)</label><input type="number" data-k="groqTemp" min="0" max="2" step="0.1"></div>
+    <div><label>Groq max answer tokens</label><input type="number" data-k="groqMaxTokens" min="64" max="8192" step="64"></div>
+  </div>
+  <div class="hint">Reasoning only works on reasoning models (Qwen 3: <i>none</i> or <i>default</i>; GPT-OSS: <i>low / medium / high</i>). A model that doesn't take it is asked again without it, automatically. Its thinking is never read out, only the answer. More reasoning = smarter but slower; watch the time limit below.</div>
   <h2 style="margin-top:16px">Gemini (fallback)</h2>
   <label>Models to try, in order (comma-separated)</label>
   <input type="text" data-k="models" autocapitalize="off" autocorrect="off">
@@ -227,7 +241,13 @@
         <option value="budget0">Off (2.5-style models)</option>
         <option value="minimal">Minimal (3.x models)</option>
         <option value="low">Low (3.x models)</option>
+        <option value="medium">Medium (3.x models)</option>
+        <option value="high">High (3.x models, slowest)</option>
       </select></div>
+  </div>
+  <div class="row">
+    <div><label>Gemini temperature (0–2)</label><input type="number" data-k="geminiTemp" min="0" max="2" step="0.1"></div>
+    <div><label>Gemini max answer tokens</label><input type="number" data-k="maxTokens" min="256" max="4096" step="64"></div>
   </div>
   <div class="hint">If a model rejects these, the Worker quietly retries without them.</div>
   <label>What should it do with the card?</label>

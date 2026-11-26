@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.15.2';
+const APP_VERSION = '1.16.0';
 const MIN_WORKER_VERSION = 5;
 const RECOMMENDED_WORKER_VERSION = 9; // 9 = Groq reads the card first, Gemini as the fallback
 
@@ -111,7 +111,7 @@ const CUE_KEYS = ['start', 'ready', 'disarmed', 'captured', 'thinking', 'answer'
 
 const DEFAULTS = {
   workerUrl: '', token: '',
-  answerer: 'groq', groqModels: '', // Groq first (if the Worker has GROQ_API_KEY), Gemini as the fallback
+  answerer: 'groq', groqModels: '', groqReasoning: 'medium', groqTemp: 0.6, groqMaxTokens: 2548, geminiTemp: 0, // Groq first (if the Worker has GROQ_API_KEY), Gemini as the fallback
   models: 'gemini-3.5-flash, gemini-flash-latest',
   mediaResolution: 'MEDIA_RESOLUTION_HIGH', thinking: 'minimal', maxTokens: 2048,
   prompt: DEFAULT_PROMPT, style: '', allItems: true,
@@ -1571,7 +1571,9 @@ function answerers() { return S.answerer === 'gemini' ? ['gemini'] : S.answerer 
 async function callWorker(dataUrl, timeoutMs, outer) {
   if (!S.workerUrl) return { ok: false, error: 'No Worker URL set' };
   const models = String(S.models || '').split(',').map((m) => m.trim()).filter(Boolean);
-  const generationConfig = { temperature: 0, maxOutputTokens: Math.max(256, +S.maxTokens || 1024) };
+  const generationConfig = { temperature: Math.min(2, Math.max(0, +S.geminiTemp || 0)), maxOutputTokens: Math.max(256, +S.maxTokens || 1024) };
+  const groq = { temperature: Math.min(2, Math.max(0, +S.groqTemp || 0)), maxTokens: Math.max(64, Math.min(8192, +S.groqMaxTokens || 2548)) };
+  if (S.groqReasoning) groq.reasoningEffort = S.groqReasoning;
   if (S.mediaResolution) generationConfig.mediaResolution = S.mediaResolution;
   if (S.thinking === 'budget0') generationConfig.thinkingConfig = { thinkingBudget: 0 };
   else if (S.thinking) generationConfig.thinkingConfig = { thinkingLevel: S.thinking };
@@ -1583,7 +1585,7 @@ async function callWorker(dataUrl, timeoutMs, outer) {
     const r = await fetch(S.workerUrl.trim().replace(/\/$/, ''), {
       method: 'POST', signal: ctrl.signal,
       headers: { 'Content-Type': 'application/json', 'X-App-Token': S.token.trim() },
-      body: JSON.stringify({ image: dataUrl, prompt: S.prompt + (S.allItems ? '' : '\n\nOnly handle the FIRST item on the card, nearest the top.') + (S.style && S.style.trim() ? '\n\nExtra instructions from the performer: ' + S.style.trim() : ''), models, generationConfig, timeoutMs, answerers: answerers(), ...(groqModels.length ? { groqModels } : {}) }),
+      body: JSON.stringify({ image: dataUrl, prompt: S.prompt + (S.allItems ? '' : '\n\nOnly handle the FIRST item on the card, nearest the top.') + (S.style && S.style.trim() ? '\n\nExtra instructions from the performer: ' + S.style.trim() : ''), models, generationConfig, timeoutMs, answerers: answerers(), groq, ...(groqModels.length ? { groqModels } : {}) }),
     });
     const j = await r.json().catch(() => ({ error: 'Bad reply from Worker (HTTP ' + r.status + ')' }));
     return { ...j, ok: r.ok && !j.error };
