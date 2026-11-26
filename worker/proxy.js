@@ -13,6 +13,9 @@
  *   ALLOWED_ORIGIN  (Text)    e.g. https://jtacoolbeans-hub.github.io
  *                             (comma-separate several; leave empty to allow any)
  *   GEMINI_MODEL    (Text, optional) default model, e.g. gemini-flash-latest
+ *   GROQ_API_KEY    (Secret, optional) your key from console.groq.com. When it is set, Groq reads the
+ *                             card FIRST and Gemini is only the fallback (Groq busy, failed or timed out).
+ *   GROQ_MODEL      (Text, optional) Groq vision model(s), comma-separated, best first
  *
  * API:
  *   GET  /   -> health check: { ok, hasKey, hasToken, tokenOk }
@@ -23,6 +26,8 @@
  *     Tries each model in turn if one is busy or fails. If a model rejects the
  *     optional settings ("invalid argument"), it retries with basic settings.
  *     returns { text, model, finishReason, geminiMs, usage, attempts }
+ *     answerers?: ["groq", "gemini"]  who to ask, in order (default: Groq first if GROQ_API_KEY is set, then Gemini)
+ *     groqModels?: ["meta-llama/llama-4-scout-17b-16e-instruct"]
  *   POST / with { tts: "words to say", voice?: "Kore", model?: "...", stream?: true }
  *     stream: true -> raw 16-bit PCM (audio/L16) sent piece by piece as Gemini makes it,
  *     so the phone can start playing almost at once. Falls back to a whole WAV file.
@@ -37,7 +42,9 @@
  *     cfModel may be one model or a comma-separated list; retired/missing models are skipped automatically.
  */
 
-const WORKER_VERSION = 8;
+const WORKER_VERSION = 9;
+const DEFAULT_GROQ_MODELS = ['meta-llama/llama-4-scout-17b-16e-instruct', 'meta-llama/llama-4-maverick-17b-128e-instruct'];
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const DEFAULT_MODEL = 'gemini-flash-latest';
 const DEFAULT_TTS_MODEL = 'gemini-2.5-flash-preview-tts';
 // Cloudflare Workers AI voices, best first. Models get retired from time to time, so we try them in turn,
@@ -85,6 +92,8 @@ export default {
         tts: true,
         ai: !!getAI(env),
         dg: !!env.DEEPGRAM_API_KEY,
+        groq: !!env.GROQ_API_KEY,
+        groqModels: groqModelList(env, null),
       });
     }
 
@@ -92,7 +101,7 @@ export default {
     if (!originOk) return json({ error: 'Origin not allowed: ' + origin }, 403);
     if (!env.APP_TOKEN) return json({ error: 'Worker is missing the APP_TOKEN secret' }, 500);
     if (!tokenOk) return json({ error: 'Wrong or missing app token' }, 401);
-    if (!env.GEMINI_API_KEY) return json({ error: 'Worker is missing the GEMINI_API_KEY secret' }, 500);
+    if (!env.GEMINI_API_KEY && !env.GROQ_API_KEY) return json({ error: 'Worker is missing the GEMINI_API_KEY (or GROQ_API_KEY) secret' }, 500);
 
     const len = Number(request.headers.get('Content-Length') || 0);
     if (len > MAX_BODY_BYTES) return json({ error: 'Image too large' }, 413);
@@ -134,7 +143,29 @@ export default {
 
     const t0 = Date.now();
     const attempts = [];
-    for (const model of models) {
+
+    // Who reads the card, in order. Groq first (fast, generous free tier) when its key is set; Gemini is the fallback.
+    let answerers = Array.isArray(body.answerers) ? body.answerers.map(String).filter((a) => a === 'groq' || a === 'gemini') : ['groq', 'gemini'];
+    if (!answerers.length) answerers = ['groq', 'gemini'];
+    if (!env.GROQ_API_KEY) answerers = answerers.filter((a) => a !== 'groq');
+    if (!env.GEMINI_API_KEY) answerers = answerers.filter((a) => a !== 'gemini');
+    if (!answerers.length) return json({ error: answersMissing(body.answerers) }, 500);
+
+    if (answerers[0] === 'groq') {
+      // Leave Gemini some time if it is the fallback: Groq gets at most ~60% of the time allowed.
+      const groqDeadline = answerers.includes('gemini') ? t0 + Math.max(2500, timeoutMs * 0.6) : deadline;
+      for (const model of groqModelList(env, body.groqModels)) {
+        const remaining = Math.min(groqDeadline, deadline) - Date.now();
+        if (remaining < 500) break;
+        const r = await callGroq(env.GROQ_API_KEY, model, mimeType, image, prompt, generationConfig, remaining);
+        attempts.push({ model: 'groq:' + model, status: r.status, ms: r.ms, error: r.error || undefined });
+        if (r.ok) return json({ text: r.text, model: 'groq/' + model, engine: 'groq', finishReason: r.finishReason, geminiMs: Date.now() - t0, usage: r.usage, attempts });
+        if (r.status === 401 || r.status === 403) break; // bad key: other Groq models won't help
+      }
+      if (!answerers.includes('gemini')) models.length = 0; // Groq only, and it failed
+    }
+
+    for (const model of (answerers.includes('gemini') ? models : [])) {
       // Try with the full settings; if Gemini says "invalid argument" (400),
       // retry once with only the basic settings (some models reject extras).
       for (const cfg of [generationConfig, basicGenConfig(generationConfig)]) {
@@ -169,6 +200,47 @@ export default {
     }, timedOut ? 504 : 502);
   },
 };
+
+function answersMissing(asked) {
+  return Array.isArray(asked) && asked.length === 1 && asked[0] === 'groq'
+    ? 'Groq is not set up: add a secret named GROQ_API_KEY to this Worker' : 'Worker is missing the GEMINI_API_KEY secret';
+}
+function groqModelList(env, asked) {
+  const list = Array.isArray(asked) && asked.length ? asked : String(env.GROQ_MODEL || '').split(',');
+  const out = list.map((m) => String(m || '').trim()).filter((m) => /^[a-z0-9][a-z0-9.\-_\/]{1,100}$/i.test(m)).slice(0, 3);
+  return out.length ? out : DEFAULT_GROQ_MODELS;
+}
+// Groq (OpenAI-style chat API) with the photo attached. Groq accepts base64 photos up to 4 MB.
+async function callGroq(key, model, mimeType, image, prompt, generationConfig, timeoutMs) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const t0 = Date.now();
+  try {
+    const res = await fetch(GROQ_URL, {
+      method: 'POST', signal: ctrl.signal,
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: 'data:' + mimeType + ';base64,' + image } },
+        ] }],
+        temperature: generationConfig.temperature || 0,
+        max_completion_tokens: Math.min(8192, generationConfig.maxOutputTokens || 1024),
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    const ms = Date.now() - t0;
+    if (!res.ok) return { ok: false, status: res.status, error: 'Groq: ' + ((data.error && data.error.message) || 'HTTP ' + res.status), ms };
+    const ch = (data.choices || [])[0] || {};
+    const text = String((ch.message && ch.message.content) || '').trim();
+    if (!text) return { ok: false, status: 502, error: 'Groq: empty reply', ms };
+    return { ok: true, status: 200, ms, text, finishReason: ch.finish_reason || null, usage: data.usage || null };
+  } catch (e) {
+    const timedOut = e && e.name === 'AbortError';
+    return { ok: false, status: timedOut ? 504 : 0, error: timedOut ? 'Groq timed out' : 'Could not reach Groq', ms: Date.now() - t0 };
+  } finally { clearTimeout(timer); }
+}
 
 // Text -> speech with Cloudflare Workers AI (no Google quota; uses the account's free daily allowance).
 // The Workers AI binding, whatever name it was given in the dashboard (AI, Voice, …).

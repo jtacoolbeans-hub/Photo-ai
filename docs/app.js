@@ -14,9 +14,9 @@
  */
 'use strict';
 
-const APP_VERSION = '1.14.2';
+const APP_VERSION = '1.15.0';
 const MIN_WORKER_VERSION = 5;
-const RECOMMENDED_WORKER_VERSION = 8; // 8 = Deepgram voice, Gemini model list, cheapest Cloudflare voice first
+const RECOMMENDED_WORKER_VERSION = 9; // 9 = Groq reads the card first, Gemini as the fallback
 
 // The first version of the prompt. Phones that saved it get the new one automatically.
 const OLD_PROMPT_V1 =
@@ -111,6 +111,7 @@ const CUE_KEYS = ['start', 'ready', 'disarmed', 'captured', 'thinking', 'answer'
 
 const DEFAULTS = {
   workerUrl: '', token: '',
+  answerer: 'groq', groqModels: '', // Groq first (if the Worker has GROQ_API_KEY), Gemini as the fallback
   models: 'gemini-3.5-flash, gemini-flash-latest',
   mediaResolution: 'MEDIA_RESOLUTION_HIGH', thinking: 'minimal', maxTokens: 2048,
   prompt: DEFAULT_PROMPT, style: '', allItems: true,
@@ -120,7 +121,7 @@ const DEFAULTS = {
   timeoutSec: 8, stallLine: 'Great question. Give me just a second with that one.',
   lateAnswer: true, lateSec: 15, retryNone: 1,
   voiceURI: '', rate: 1.0, toneVol: 0.3, speakQuestion: false, thinkTicks: true,
-  btnSingle: 'toggle', btnDouble: 'capture', btnTriple: 'repeat', autoArm: false, keyboard: true, gamepad: true, binds: {}, sayReady: true,
+  btnSingle: 'toggle', btnDouble: 'capture', btnTriple: 'repeat', autoArm: false, keyboard: true, gamepad: true, binds: {}, sayReady: true, pressOverrides: true,
   camId: '', res: '1920x1440', camFps: 15, zoom: null, torch: false,
   useCrop: true, crop: { x: 0.1, y: 0.15, w: 0.8, h: 0.7 },
   motionThresh: 4, sharpMin: 20, changeThresh: 10, cooldownSec: 4,
@@ -279,6 +280,17 @@ function beepNow(name) {
 
 // ---------------------------------------------------------------- speech
 let speaking = false, deviceSpeaking = false, speakProg = null, speechChain = Promise.resolve(), speechNote = '';
+let speechEpoch = 0; // goes up when STOP is pressed: anything queued before that is dropped
+const liveSources = new Set(); // Web Audio voice pieces now playing, so STOP can cut them off
+function stopAllAudio() {
+  speechEpoch++;
+  speechChain = Promise.resolve();
+  try { speechSynthesis.cancel(); } catch {}
+  for (const src of liveSources) { try { src.stop(); } catch {} }
+  liveSources.clear();
+  voiceClock = 0; speaking = false; speakProg = null;
+  sev('all sound stopped');
+}
 const liveUtterances = new Set(); // keep references: Safari can drop an utterance that gets garbage-collected mid-speech
 let loopPausedForSpeech = false, loopHold = 0, loopResumeTimer = null, audioQuiet = false;
 // Put Web Audio (the beeps) to sleep before the iPhone voice talks, and wake it only after speech is over.
@@ -343,16 +355,19 @@ function speak(text) {
     const pieces = voiceChunks(text);
     const first = voiceOrder()[0];
     const jobs = isParallel(first) ? pieces.map((c) => voiceJob(c, { engine: first })) : [];
+    const ep = speechEpoch;
     speechChain = speechChain.then(async () => {
+      if (ep !== speechEpoch) return;
       speaking = true; setSub();
       sev('speaking ' + pieces.length + ' piece' + (pieces.length > 1 ? 's' : '') + ', ' + text.length + ' characters');
-      try { for (let i = 0; i < pieces.length; i++) { speakProg = { i: i + 1, n: pieces.length }; setSub(); await playVoice(pieces[i], jobs[i], i < pieces.length - 1); } }
-      finally { speaking = false; speakProg = null; setSub(); }
+      try { for (let i = 0; i < pieces.length && ep === speechEpoch; i++) { speakProg = { i: i + 1, n: pieces.length }; setSub(); await playVoice(pieces[i], jobs[i], i < pieces.length - 1, ep); } }
+      finally { if (ep === speechEpoch) { speaking = false; speakProg = null; setSub(); } }
     });
     return speechChain;
   }
   const chunks = splitSpeech(text);
-  speechChain = speechChain.then(async () => { holdLoop(true); try { for (const ch of chunks) await speakDeviceNow(ch); } finally { releaseLoop(); } });
+  const ep = speechEpoch;
+  speechChain = speechChain.then(async () => { if (ep !== speechEpoch) return; holdLoop(true); try { for (const ch of chunks) { if (ep !== speechEpoch) break; await speakDeviceNow(ch); } } finally { releaseLoop(); } });
   return speechChain;
 }
 // Cut text into pieces at sentence ends: a short first piece (so sound starts quickly), longer ones after.
@@ -393,9 +408,11 @@ function deviceChunks(text) { // short pieces (one sentence or so): iOS keeps th
   return out;
 }
 async function speakDevice(text) { // piece by piece; if a piece dies, report exactly how far we got
-  const pieces = deviceChunks(text); let off = 0, any = false;
+  const pieces = deviceChunks(text); let off = 0, any = false; const ep = speechEpoch;
   for (const piece of pieces) {
+    if (ep !== speechEpoch) return { started: any, died: false, error: '', spokenChars: text.length, failed: false, cancelled: true };
     const at = text.indexOf(piece, off), r = await speakDeviceNow(piece);
+    if (ep !== speechEpoch) return { started: any, died: false, error: '', spokenChars: text.length, failed: false, cancelled: true };
     if (r.started) any = true;
     if (!r.started || r.died || r.error) return { started: any, died: r.started, error: r.error, spokenChars: Math.max(0, at) + (r.died ? Math.min(r.spokenChars || 0, piece.length) : 0), failed: true };
     off = at + piece.length;
@@ -406,6 +423,7 @@ function speakDeviceNow(text) {
   return new Promise((resolve) => {
     let done = false, started = false, tries = 0, cur = null, kick = null, poll = null, errName = '', died = false, gotB = false, lastB = 0, spoke = 0;
     deviceSpeaking = true;
+    const ep = speechEpoch;
     const dm = deviceMode();
     try { if (navigator.audioSession) navigator.audioSession.type = dm.session; } catch {}
     if (dm.loop === 'play' && keepAlive && keepAlive.paused && running) keepAlive.play().catch(() => {});
@@ -456,6 +474,7 @@ function speakDeviceNow(text) {
       }, 300);
       kick = setTimeout(() => {
         if (started || done) return;
+        if (ep !== speechEpoch) { finish(); return; } // STOP was pressed: don't retry
         // iOS sometimes skips the "started" event while it IS talking: never cut that off
         if (speechSynthesis.speaking && !speechSynthesis.pending) { started = true; sev('no start event, but it is talking — leaving it alone'); return; }
         sev('voice did not start — retrying');
@@ -531,7 +550,7 @@ async function checkWorker() {
   if ((workerInfo.version || 1) < MIN_WORKER_VERSION) engineDown.cf = 'Worker is out of date — paste the new proxy.js into Cloudflare';
   else if (!workerInfo.ai) engineDown.cf = 'not connected — add a Workers AI binding to the Worker';
   else engineDown.cf = '';
-  sev('Worker v' + (workerInfo.version || '?') + (workerInfo.ai ? ', Cloudflare voice connected' : ', no Cloudflare voice') + (workerInfo.dg ? ', Deepgram voice set up' : ''));
+  sev('Worker v' + (workerInfo.version || '?') + (workerInfo.ai ? ', Cloudflare voice connected' : ', no Cloudflare voice') + (workerInfo.dg ? ', Deepgram voice set up' : '') + (workerInfo.groq ? ', Groq answers first' : ', no Groq key (Gemini answers)'));
   setSub();
   return workerInfo;
 }
@@ -579,13 +598,15 @@ function friendlyError(m) {
   return m.length > 160 ? m.slice(0, 157) + '…' : m;
 }
 // Say one line with the first voice that works; skip a voice for the rest of the session if it is out of quota.
-async function playVoice(text, firstJob, more = false) {
+async function playVoice(text, firstJob, more = false, ep = speechEpoch) {
   const errs = [];
   for (const eng of voiceOrder()) {
+    if (ep !== speechEpoch) return; // STOP pressed
     if (eng === 'device') { // last resort: the iPhone's own voice (unlimited and free)
       holdLoop(true);
       try {
         const r = await speakDevice(text);
+        if (ep !== speechEpoch) return;
         if (!r.failed) { if (/^Voice/.test(speechNote)) speechNote = ''; return; }
         if (r.started) { // it spoke part of it, then iOS cut it off: the online voice carries on from there, not from the start
           const rest = text.slice(Math.max(0, r.spokenChars)).trim();
@@ -605,7 +626,7 @@ async function playVoice(text, firstJob, more = false) {
     for (const t of tries) {
       const job = (firstJob && !firstJob.failed && firstJob.engine === eng && t.stream !== false && !t.retry) ? firstJob : voiceJob(text, { engine: eng, ...t });
       try {
-        await playJob(job, more);
+        await playJob(job, more, ep);
         if (/^Voice/.test(speechNote)) speechNote = '';
         return;
         engineFails[eng] = 0;
@@ -619,6 +640,7 @@ async function playVoice(text, firstJob, more = false) {
       }
     }
   }
+  if (ep !== speechEpoch) return;
   if (!errs.length) { // every voice was already ruled out this session: say why
     if (engineDown.dg && S.voiceEngine === 'dg') errs.push('Deepgram: ' + engineDown.dg);
     if (engineDown.cf) errs.push('Cloudflare: ' + engineDown.cf);
@@ -707,15 +729,17 @@ async function ensureAudioRunning() {
 }
 // Play a voice as its pieces arrive, gap-free. Resolves after the last piece has played.
 let voiceClock = 0; // when the previous piece of audio ends, so the next piece starts exactly then
-async function playJob(job, more = false) {
+async function playJob(job, more = false, ep = speechEpoch) {
   const c = await ensureAudioRunning();
   let i = 0, t = 0, any = false;
   for (;;) {
+    if (ep !== speechEpoch) return; // STOP pressed
     while (i < job.chunks.length) {
       const ch = job.chunks[i++];
       const b = c.createBuffer(1, ch.data.length, ch.rate);
       b.getChannelData(0).set(ch.data);
       const src = c.createBufferSource(); src.buffer = b; src.connect(c.destination);
+      liveSources.add(src); src.onended = () => liveSources.delete(src);
       if (!any) t = Math.max(c.currentTime + 0.05, voiceClock); else if (t < c.currentTime + 0.01) t = c.currentTime + 0.01;
       src.start(t); t += b.duration;
       if (!any) sev('voice "' + job.text.slice(0, 24) + '" — ' + (job.mode || '?') + (job.model ? ' [' + job.model.split('/').pop() + ']' : '') + ', first sound after ' + job.firstMs + ' ms');
@@ -730,7 +754,7 @@ async function playJob(job, more = false) {
   // interrupted. If another piece follows, come back a moment BEFORE this one ends so the next is already queued.
   const wantEnd = more ? t - 0.25 : t + 0.06;
   const guard = performance.now() + Math.max(2500, (t - c.currentTime) * 3000 + 4000);
-  while (c.currentTime < wantEnd && performance.now() < guard) {
+  while (c.currentTime < wantEnd && performance.now() < guard && ep === speechEpoch) {
     if (c.state !== 'running' && c.state !== 'closed') { sev('Web Audio ' + c.state + ' while speaking — waking it'); await c.resume().catch(() => {}); }
     await sleep(80);
   }
@@ -819,6 +843,8 @@ function doAction(action, source) {
   if (action === 'toggle') setArmed(!armed);
   else if (action === 'capture') forceCapture(source);
   else if (action === 'repeat') repeatLast();
+  else if (action === 'stop') stopCurrent(source);
+  else if (action === 'stopPause') stopCurrent(source, true);
 }
 
 // ---------------------------------------------------------------- wake lock
@@ -837,6 +863,7 @@ async function requestWakeLock() {
 let stream = null, track = null;
 let video = $('video');
 let lastFrameAt = performance.now(), lastCT = 0, lastCTAt = performance.now(), blackSince = 0, mutedSince = 0;
+let settleUntil = 0, restartingSince = 0, hiddenAt = 0;
 let camBusy = false, restarting = false, lastRestartAt = 0, camRestarts = 0, camNote = '', safeMode = false;
 const hasRVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
 
@@ -870,7 +897,12 @@ async function openCamera(opts = {}) {
     if (S.camId) v.deviceId = { exact: S.camId }; else v.facingMode = { ideal: 'environment' };
   }
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: v });
+    // iOS can leave getUserMedia hanging forever when it's called while the app is in the background or just coming
+    // back: give up after 10 s (and throw away a camera that turns up late) so the next try isn't blocked behind it.
+    const ask = navigator.mediaDevices.getUserMedia({ audio: false, video: v });
+    let late = false;
+    stream = await Promise.race([ask, sleep(10000).then(() => { late = true; const e = new Error('camera did not answer'); e.name = 'TimeoutError'; throw e; })]);
+    ask.then((st) => { if (late) st.getTracks().forEach((t) => t.stop()); }, () => {});
   } catch (e) {
     if (S.camId && !safeMode && e.name !== 'NotAllowedError') { S.camId = ''; saveSettings(); return openCamera(opts); } // saved camera gone: fall back
     throw e;
@@ -886,6 +918,7 @@ async function openCamera(opts = {}) {
     try { await t.applyConstraints({ width: { ideal: caps.width.max }, height: { ideal: caps.height.max }, frameRate: { ideal: +S.camFps || 15 } }); } catch {}
   }
   for (let i = 0; i < 30 && !vid.videoWidth; i++) await sleep(100);
+  settleUntil = performance.now() + 1200; // let exposure and focus settle before anything is judged or read
   setupCamControls(caps);
   listCameras();
   prevGrey = null;
@@ -899,7 +932,7 @@ let camLost = false, autoRetries = 0, retryTimer = null;
 async function restartCamera(reason) {
   if (restarting || camBusy || !running) return;
   if (reason === 'picture black' && Date.now() - lastRestartAt < 20000) return;
-  restarting = true; clearTimeout(retryTimer);
+  restarting = true; restartingSince = Date.now(); clearTimeout(retryTimer);
   const gesture = /^(manual|tap|key)/.test(reason);
   // only a frozen/black/stopped camera that keeps failing falls back to 720p; coming back to the app never does
   const quick = !gesture && !/^(returned|page restored|auto)/.test(reason) && Date.now() - lastRestartAt < 30000;
@@ -925,10 +958,9 @@ async function restartCamera(reason) {
   safeMode = false; restarting = false; camLost = true;
   logCapture({ t: Date.now(), trigger: 'watchdog', status: 'camera', reply: 'Camera could not reconnect: ' + (lastErr ? lastErr.name + ' — ' + lastErr.message : ''), error: '', latencyMs: 0 });
   showCamLost(true, lastErr);
-  if (autoRetries < 5) { // quiet background retries with longer gaps
-    const d = [3000, 6000, 12000, 20000, 30000][autoRetries++];
-    retryTimer = setTimeout(() => { if (camLost && !document.hidden) restartCamera('auto retry'); }, d);
-  }
+  // quiet background retries with longer gaps, then every 30 s for as long as the app is open
+  const d = [3000, 6000, 12000, 20000][autoRetries++] || 30000;
+  retryTimer = setTimeout(() => { if (camLost && !document.hidden) restartCamera('auto retry'); }, d);
 }
 function showCamLost(on, err) {
   $('camLost').hidden = !on;
@@ -937,14 +969,24 @@ function showCamLost(on, err) {
     ? 'iOS blocked the camera after you left the app.' : 'The camera did not come back.';
   camNote = 'Camera disconnected — tap the orange panel or press any key'; setSub();
 }
-function gestureReconnect() { if (camLost && running && !restarting && !camBusy) restartCamera('tap'); }
+function unstick() { // a restart that has hung (iOS paused it while the app was away) must not block the next one
+  if ((restarting || camBusy) && Date.now() - restartingSince > 20000) { sev('camera restart was stuck — clearing it'); restarting = false; camBusy = false; }
+}
+function gestureReconnect() { unstick(); if (camLost && running && !restarting && !camBusy) restartCamera('tap'); }
 document.addEventListener('click', gestureReconnect, true);
-document.addEventListener('keydown', () => { if (camLost && running && !restarting && !camBusy) restartCamera('key'); }, true);
+document.addEventListener('keydown', (e) => {
+  unstick();
+  if (!camLost || !running || restarting || camBusy || learning) return;
+  e.preventDefault(); e.stopImmediatePropagation(); // this press reconnects the camera; it doesn't also arm / capture
+  restartCamera('key');
+}, true);
 
 // Watchdog: runs on its own timer, separate from the capture loop.
 setInterval(() => {
+  unstick();
   if (!running || restarting || camBusy || camLost || document.hidden) return;
   const now = performance.now();
+  if (now < settleUntil) return;
   if (video.paused && video.srcObject) video.play().catch(() => {});
   if (video.currentTime !== lastCT) { lastCT = video.currentTime; lastCTAt = now; }
   if (track && track.muted) { if (!mutedSince) mutedSince = now; } else mutedSince = 0;
@@ -1245,7 +1287,8 @@ function setArmed(on) {
   armed = on;
   if (on) { if (phase !== 'busy') phase = 'watch'; stillCount = 0; collect = null; needChange = false; noneRetries = 0; tone('ready'); }
   else { if (phase !== 'busy') phase = 'idle'; collect = null; tone('disarmed'); }
-  $('btnArm').innerHTML = armed ? '■ DISARM<small>armed — watching</small>' : '● ARM<small>earbud: single press</small>';
+  $('btnArm').innerHTML = armed ? '⏸ PAUSE AUTO<small>auto reads on — tap to pause</small>' : '▶ AUTO<small>auto reads paused — tap to start</small>';
+  try { localStorage.setItem(RESUME_KEY, JSON.stringify({ at: Date.now(), armed })); } catch {}
   $('btnArm').classList.toggle('armed', armed);
   setSub();
 }
@@ -1267,6 +1310,7 @@ function loop() {
 
 function tick() {
   if (!video.videoWidth || document.hidden || restarting || camBusy) return;
+  if (performance.now() < settleUntil) { prevGrey = null; stillCount = 0; return; } // camera just (re)started: recalibrate first
   if (frozen) return; // picture frozen after a capture: no checking, nothing can trip a new read
   // Never act on a stale picture (a frozen feed would just be read again and again):
   if (hasRVFC && !document.body.classList.contains('showmode') && performance.now() - lastFrameAt > 2500) return;
@@ -1275,7 +1319,7 @@ function tick() {
   lastMotion = motion; checks++;
   const still = motion < S.motionThresh;
   const pg = detectCurrent(); // is there a page / card in view? (no Gemini call)
-  if (motion > S.changeThresh) { needChange = false; softSince = 0; if (phase === 'busy') movedWhileBusy = true; } // card moved / changed
+  if (motion > S.changeThresh && motion < 255) { needChange = false; softSince = 0; if (phase === 'busy') movedWhileBusy = true; } // card moved / changed
 
   if (phase === 'watch') {
     stillCount = still && pg.present ? stillCount + 1 : 0; // nothing is read until a page is in view and still
@@ -1314,8 +1358,31 @@ function tick() {
   updateMeters(still);
 }
 
+// STOP / RESET: silence everything, drop the read in progress, unfreeze the picture. The card that was being read is
+// not read again until it changes. pauseAuto: also pause automatic reads.
+let capEpoch = 0, capAbort = null, capTimers = [], lastForceAt = 0;
+function stopCurrent(why = 'button', pauseAuto = false) {
+  if (!running) return;
+  capEpoch++;
+  if (capAbort) { try { capAbort.abort(); } catch {} capAbort = null; }
+  capTimers.forEach((t) => { clearTimeout(t); clearInterval(t); }); capTimers = [];
+  stopAllAudio();
+  unfreezeView();
+  collect = null; softSince = 0; noneRetries = 0; stillCount = 0; movedWhileBusy = false;
+  needChange = true; nextAutoAt = Date.now() + 800;
+  phase = armed ? 'watch' : 'idle';
+  if (pauseAuto && armed) setArmed(false); else beepNow('disarmed');
+  logCapture({ t: Date.now(), trigger: String(why), status: 'stopped', reply: pauseAuto ? 'Stopped + auto reads paused' : 'Stopped / reset', error: '', latencyMs: 0 });
+  setSub();
+}
 function forceCapture(source = 'button') {
-  if (!running || phase === 'busy') return;
+  if (!running) return;
+  if (phase === 'busy' || frozen || speaking) {
+    // A button press wins over whatever is happening (an auto read, an answer being spoken): stop it and read now.
+    if (!S.pressOverrides || Date.now() - lastForceAt < 800) return;
+    stopCurrent('capture override (' + source + ')');
+  }
+  lastForceAt = Date.now();
   collect = { n: 0, best: -1, forced: true, source, motion: lastMotion };
   phase = 'collect';
   loop();
@@ -1323,9 +1390,11 @@ function forceCapture(source = 'button') {
 
 // ---------------------------------------------------------------- one capture -> Gemini -> speech
 async function handleCapture(c) {
-  try { await runCapture(c); }
+  const my = capEpoch;
+  try { await runCapture(c, my); }
   catch (e) { // whatever goes wrong, never leave the app stuck on "busy"
     console.warn(e);
+    if (my !== capEpoch) return; // STOP was pressed: it has already tidied up
     logCapture({ t: Date.now(), trigger: c.source, status: 'fail', sharp: Math.round(c.best), motion: +(c.motion || 0).toFixed(1),
                  error: 'App error: ' + e.message, reply: '', latencyMs: 0 });
     try { await tone('failed'); await speak(S.stallLine); } catch {}
@@ -1355,7 +1424,9 @@ function unfreezeView() {
   stillCount = 0;
 }
 
-async function runCapture(c) {
+async function runCapture(c, my) {
+  const gone = () => my !== capEpoch; // STOP (or a new button capture) took over
+  capAbort = new AbortController();
   freezeView();
   setState('captured');
   movedWhileBusy = false;
@@ -1374,20 +1445,24 @@ async function runCapture(c) {
   readCount++;
   setState('thinking');
   const timeoutMs = ((+S.timeoutSec || 8) + (S.lateAnswer ? (+S.lateSec || 0) : 0)) * 1000;
-  const pending = callWorker(dataUrl, timeoutMs); // send first, beep while it uploads
+  const pending = callWorker(dataUrl, timeoutMs, capAbort); // send first, beep while it uploads
   tone('thinking');
 
   let ticker = S.thinkTicks ? setInterval(() => tone('thinking'), 2000) : null;
   let stalled = false;
   const stallTimer = setTimeout(async () => {
+    if (gone()) return;
     stalled = true; clearInterval(ticker); ticker = null;
     setState('stalling');
     await tone('failed'); speak(S.stallLine);
   }, (+S.timeoutSec || 8) * 1000);
+  capTimers = [stallTimer, ticker];
 
   const res = await pending;
+  clearTimeout(stallTimer); clearInterval(ticker); capTimers = [];
+  if (gone()) return; // stopped while thinking: say nothing
+  capAbort = null;
   if (S.freezeMode === 'answer') unfreezeView();
-  clearTimeout(stallTimer); clearInterval(ticker);
   entry.latencyMs = Math.round(performance.now() - t0);
   entry.geminiMs = res.geminiMs; entry.model = res.model || ''; entry.attempts = res.attempts;
   entry.reply = res.text || ''; entry.error = res.error || '';
@@ -1410,13 +1485,15 @@ async function runCapture(c) {
   showLast(entry);
 
   if (next === 'retry') { noneRetries++; finish(false, true); } // try again with the next still window
-  else if (next === 'stall') { if (!stalled) { await tone('failed'); await speak(S.stallLine); } finish(true); }
+  else if (next === 'stall') { if (!stalled) { await tone('failed'); if (gone()) return; await speak(S.stallLine); } if (!gone()) finish(true); }
   else if (next === 'skip') finish(true);
   else {
     await speechChain; // let the stall line finish first
+    if (gone()) return;
     await tone('answer');
+    if (gone()) return;
     await speakItems(parsed.items);
-    finish(true);
+    if (!gone()) finish(true);
   }
 }
 
@@ -1486,7 +1563,8 @@ function itemTexts(items) { // exactly what gets spoken, in order
 }
 function speakItems(items) { itemTexts(items).forEach((t) => speak(t)); return speechChain; }
 
-async function callWorker(dataUrl, timeoutMs) {
+function answerers() { return S.answerer === 'gemini' ? ['gemini'] : S.answerer === 'groqOnly' ? ['groq'] : ['groq', 'gemini']; }
+async function callWorker(dataUrl, timeoutMs, outer) {
   if (!S.workerUrl) return { ok: false, error: 'No Worker URL set' };
   const models = String(S.models || '').split(',').map((m) => m.trim()).filter(Boolean);
   const generationConfig = { temperature: 0, maxOutputTokens: Math.max(256, +S.maxTokens || 1024) };
@@ -1495,16 +1573,18 @@ async function callWorker(dataUrl, timeoutMs) {
   else if (S.thinking) generationConfig.thinkingConfig = { thinkingLevel: S.thinking };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs + 1500);
+  if (outer) outer.signal.addEventListener('abort', () => ctrl.abort());
+  const groqModels = String(S.groqModels || '').split(',').map((m) => m.trim()).filter(Boolean);
   try {
     const r = await fetch(S.workerUrl.trim().replace(/\/$/, ''), {
       method: 'POST', signal: ctrl.signal,
       headers: { 'Content-Type': 'application/json', 'X-App-Token': S.token.trim() },
-      body: JSON.stringify({ image: dataUrl, prompt: S.prompt + (S.allItems ? '' : '\n\nOnly handle the FIRST item on the card, nearest the top.') + (S.style && S.style.trim() ? '\n\nExtra instructions from the performer: ' + S.style.trim() : ''), models, generationConfig, timeoutMs }),
+      body: JSON.stringify({ image: dataUrl, prompt: S.prompt + (S.allItems ? '' : '\n\nOnly handle the FIRST item on the card, nearest the top.') + (S.style && S.style.trim() ? '\n\nExtra instructions from the performer: ' + S.style.trim() : ''), models, generationConfig, timeoutMs, answerers: answerers(), ...(groqModels.length ? { groqModels } : {}) }),
     });
     const j = await r.json().catch(() => ({ error: 'Bad reply from Worker (HTTP ' + r.status + ')' }));
     return { ...j, ok: r.ok && !j.error };
   } catch (e) {
-    return { ok: false, error: e.name === 'AbortError' ? 'Timed out' : 'Network error: ' + e.message };
+    return { ok: false, cancelled: !!(outer && outer.signal.aborted), error: e.name === 'AbortError' ? (outer && outer.signal.aborted ? 'Stopped' : 'Timed out') : 'Network error: ' + e.message };
   } finally { clearTimeout(timer); }
 }
 
@@ -1516,9 +1596,9 @@ function repeatLast() {
 
 // ---------------------------------------------------------------- UI updates
 const STATE_STYLE = {
-  off: ['Not started', '#555'], idle: ['Disarmed', '#777'], watch: ['Armed — watching', '#4caf50'],
+  off: ['Not started', '#555'], idle: ['Auto paused', '#777'], watch: ['Auto on — watching', '#4caf50'],
   collect: ['Card still — picking sharpest', '#ffb300'], captured: ['Captured', '#ffb300'],
-  thinking: ['Thinking…', '#4fa3ff'], stalling: ['Slow — stall line', '#ff5252'],
+  thinking: ['Thinking…', '#4fa3ff'], stopped: ['Stopped', '#777'], stalling: ['Slow — stall line', '#ff5252'],
 };
 let shownState = 'off', lastStateTxt = '';
 function setState(s) { shownState = s; renderState(); }
@@ -1570,7 +1650,7 @@ function updateMeters(still) {
     pb.style.left = (c.x + bb.x0 * c.w) * 100 + '%'; pb.style.top = (c.y + bb.y0 * c.h) * 100 + '%';
     pb.style.width = (bb.x1 - bb.x0) * c.w * 100 + '%'; pb.style.height = (bb.y1 - bb.y0) * c.h * 100 + '%'; pb.hidden = false;
   } else pb.hidden = true;
-  $('readsInfo').textContent = 'Cards sent to Gemini this session: ' + readCount;
+  $('readsInfo').textContent = 'Cards read this session: ' + readCount;
   $('usageInfo').textContent = usageText();
   $('pageWhy').textContent = S.pageDetect === 'off' ? 'Page detection is off.' : 'Page: ' + (lastPage.present ? '✓ ' : '✕ ') + lastPage.reason + (lastPage.method === 'empty view' ? ' [vs empty view]' : '') + (lastPage.chroma != null ? ' · colour spread ' + lastPage.chroma : '');
   renderState(); setSub();
@@ -1614,7 +1694,8 @@ $('btnStart').onclick = async () => {
   }
   running = true; phase = 'idle';
   await requestWakeLock();
-  ['btnArm', 'btnForce', 'btnRepeat', 'btnShow', 'btnCam'].forEach((id) => { $(id).disabled = false; });
+  ['btnArm', 'btnForce', 'btnRepeat', 'btnStop', 'btnShow', 'btnCam'].forEach((id) => { $(id).disabled = false; });
+  $('resumeBox').hidden = true;
   $('btnStart').innerHTML = '● RUNNING<small>camera on</small>';
   $('btnStart').classList.remove('pri'); $('btnStart').classList.add('running');
   $('placeholder').style.display = 'none';
@@ -1622,10 +1703,19 @@ $('btnStart').onclick = async () => {
   drawCropBox();
   await tone('start');
   if (netVoice()) { await checkWorker(); prewarmVoice(); if (S.sayReady && isParallel(voiceOrder()[0])) speak('Ready'); }
-  if (S.autoArm) setArmed(true);
+  if (S.autoArm || resumeArmed) setArmed(true);
+  resumeArmed = false;
   loop();
 };
 $('btnArm').onclick = () => setArmed(!armed);
+$('btnStop').onclick = () => stopCurrent('button');
+(function stopLongPress() { // hold STOP for ~0.7 s: stop AND pause automatic reads
+  let t = null, held = false;
+  const b = $('btnStop');
+  b.addEventListener('pointerdown', () => { held = false; t = setTimeout(() => { held = true; stopCurrent('button (held)', true); }, 700); });
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => b.addEventListener(ev, () => clearTimeout(t)));
+  b.addEventListener('click', (e) => { if (held) { e.stopImmediatePropagation(); held = false; } }, true);
+})();
 $('btnForce').onclick = () => forceCapture('button');
 $('btnRepeat').onclick = repeatLast;
 function setShowMode(on) {
@@ -1787,11 +1877,12 @@ $('btnTestConn').onclick = async () => {
   try {
     const j = await (await fetch(S.workerUrl.trim().replace(/\/$/, ''), { headers: { 'X-App-Token': S.token.trim() } })).json();
     const lines = [
-      (j.hasKey ? '✅' : '❌') + ' Gemini key stored in Worker',
+      (j.hasKey ? '✅' : (j.groq ? 'ℹ' : '❌')) + ' Gemini key stored in Worker' + (j.hasKey ? '' : j.groq ? ' (no fallback if Groq fails)' : ''),
       (j.tokenOk ? '✅' : '❌') + ' App token matches',
       (j.originOk ? '✅' : '❌') + ' This page is allowed',
       ((j.version || 1) >= MIN_WORKER_VERSION ? '✅ Worker is up to date' : '❌ Worker is OUT OF DATE — paste the new worker/proxy.js into Cloudflare'),
       ((j.version || 1) < MIN_WORKER_VERSION ? '❌ Cloudflare voice needs the new Worker code first' : j.ai ? '✅ Cloudflare voice connected' : '❌ Cloudflare voice not connected — add a Workers AI binding (see README)'),
+      ((j.version || 1) < 9 ? '❌ Groq needs the newest Worker code (proxy.js v9) — Gemini answers until then' : j.groq ? '✅ Groq key stored — Groq answers first, Gemini is the fallback' : 'ℹ Groq not set up (add a GROQ_API_KEY secret, see README) — Gemini answers'),
       (j.dg ? '✅ Deepgram voice set up' : (j.version || 1) >= 8 ? 'ℹ Deepgram voice not set up (optional, free credit: see the README)' : ''),
       ((j.version || 1) >= MIN_WORKER_VERSION && (j.version || 1) < RECOMMENDED_WORKER_VERSION ? '⚠ Worker v' + j.version + ' — paste the newest proxy.js (Deepgram voice, cheaper Cloudflare voice, more Gemini voice models)' : ''),
     ];
@@ -1813,6 +1904,8 @@ function keyAction(k) {
   if (k === 'r') return repeatLast;
   if (k === 's') return () => setShowMode(!document.body.classList.contains('showmode'));
   if (k === 'k') return () => restartCamera('manual');
+  if (k === 'x' || k === 'Backspace') return () => stopCurrent('key-' + k.toLowerCase());
+  if (k === 'z') return () => stopCurrent('key-z', true);
   if (k === 'Escape') return () => { if (!$('reader').hidden) closeReader(); else setShowMode(false); };
   return null;
 }
@@ -1839,7 +1932,8 @@ document.addEventListener('keyup', (e) => {
 // ---------------------------------------------------------------- learn your own buttons (8BitDo etc.)
 // A controller can show up two ways: as a KEYBOARD (its buttons send keys) or as a GAMEPAD (Safari's gamepad
 // support). Both work the same: tap Learn, press the button, and it is remembered.
-const BIND_ACTIONS = [['toggle', 'Arm / disarm'], ['capture', 'Capture now'], ['repeat', 'Repeat last answer'],
+const BIND_ACTIONS = [['toggle', 'Auto reads on / pause'], ['capture', 'Capture now (overrides auto)'], ['repeat', 'Repeat last answer'],
+                      ['stop', 'Stop / reset (silence, unfreeze)'], ['stopPause', 'Stop + pause auto reads'],
                       ['show', 'Show mode on / off'], ['camera', 'Restart camera']];
 const PAD_DEFAULTS = { 'g:b0': 'toggle', 'g:b1': 'capture', 'g:b3': 'repeat' }; // standard layout: A, B, Y
 let learning = null, learnTimer = null, padPrev = null, padName = '';
@@ -1854,6 +1948,8 @@ function runBound(action) {
   if (action === 'toggle') setArmed(!armed);
   else if (action === 'capture') forceCapture('bound');
   else if (action === 'repeat') repeatLast();
+  else if (action === 'stop') stopCurrent('bound');
+  else if (action === 'stopPause') stopCurrent('bound', true);
   else if (action === 'show') setShowMode(!document.body.classList.contains('showmode'));
   else if (action === 'camera') restartCamera('manual');
 }
@@ -1902,19 +1998,56 @@ function padPoll() {
 function padPress(k) {
   if (learning) { learned(k); return; }
   if (!S.gamepad || !running) return; // a controller can't START the app: iOS needs a real tap or key for that
+  if (camLost) { unstick(); if (!restarting && !camBusy) restartCamera('pad'); return; }
   const a = boundAction(k) || PAD_DEFAULTS[k]; if (a) runBound(a);
 }
 setInterval(padPoll, 60);
 
 // ---------------------------------------------------------------- lifecycle
+// Leaving the app (swipe away / lock) and coming back: iOS freezes or takes the camera while you're away, and after a
+// while it may refuse to give it back without a tap. On return: clear anything stuck, wake sound and the earbud
+// buttons, and reconnect the camera; if iOS wants a tap first, the orange panel says so and ANY tap or key reconnects.
+// If iOS threw the whole page away while you were gone, the page offers "tap or press any key to resume".
+const RESUME_KEY = 'cardAssistant.resume.v1';
+let resumeArmed = false;
+function markRunning() { if (running) try { localStorage.setItem(RESUME_KEY, JSON.stringify({ at: Date.now(), armed })); } catch {} }
 document.addEventListener('visibilitychange', async () => {
-  if (document.hidden || !running) return;
+  if (document.hidden) {
+    hiddenAt = Date.now(); markRunning();
+    if (running && phase === 'collect') { collect = null; phase = armed ? 'watch' : 'idle'; } // don't finish a half-taken shot on return
+    return;
+  }
+  if (!running) return;
+  const away = hiddenAt ? Date.now() - hiddenAt : 0;
+  sev('back in the app after ' + Math.round(away / 1000) + ' s');
+  unstick(); autoRetries = 0; clearTimeout(retryTimer);
   if (!wakeLock) requestWakeLock();
+  setupMediaSession(); // iOS can drop the earbud-button handlers while the page is in the background
   playLoop();
   setAudioSession();
-  setTimeout(() => restartCamera('returned to app'), 600); // iOS usually freezes the camera while the app is away
+  wakeAudio();
+  prevGrey = null; stillCount = 0; smoothBox = null;
+  if (away > 5000) needChange = true; // don't re-read the card that was already in view when you left
+  setTimeout(() => { unstick(); if (camLost) showCamLost(true); restartCamera('returned to app'); }, 600); // iOS usually freezes the camera while the app is away
 });
-window.addEventListener('pageshow', (e) => { if (e.persisted && running) restartCamera('page restored'); });
+window.addEventListener('pageshow', (e) => { if (e.persisted && running) { unstick(); restartCamera('page restored'); } });
+window.addEventListener('pagehide', markRunning);
+setInterval(markRunning, 30000);
+(function offerResume() { // the page was reloaded by iOS while a session was running: one tap or key brings it back
+  let r = null; try { r = JSON.parse(localStorage.getItem(RESUME_KEY) || 'null'); } catch {}
+  if (!r || Date.now() - r.at > 2 * 3600 * 1000) return;
+  const box = $('resumeBox'); if (!box) return;
+  box.hidden = false;
+  const go = (e) => {
+    if (running || box.hidden) return off();
+    if (e && e.target && e.target.closest && e.target.closest('details, input, select, textarea, a')) return; // using settings
+    if (e && e.type === 'keydown') e.preventDefault();
+    resumeArmed = !!r.armed; off(); $('btnStart').click();
+  };
+  const off = () => { document.removeEventListener('click', go, true); document.removeEventListener('keydown', go, true); };
+  document.addEventListener('click', go, true); document.addEventListener('keydown', go, true);
+  $('resumeNo').onclick = (e) => { e.stopPropagation(); box.hidden = true; off(); try { localStorage.removeItem(RESUME_KEY); } catch {} };
+})();
 
 function buildCueSettings() {
   const box = $('cueList');

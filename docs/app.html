@@ -79,6 +79,9 @@
   .controls button.pri { background:var(--acc); color:#000; } .controls button.pri small { color:#00264d; }
   .controls button.armed { background:var(--ok); color:#000; } .controls button.armed small { color:#063; }
   .controls button.running { background:var(--card2); color:var(--ok); }
+  .controls button.stop { grid-column:1 / -1; background:#b3261e; color:#fff; } .controls button.stop small { color:#ffd6d2; }
+  #resumeBox { margin:8px 0; padding:14px; border-radius:12px; background:#0b3d1f; border:2px solid var(--ok); text-align:center; }
+  #resumeBox b { font-size:18px; color:var(--ok); display:block; } #resumeBox button { margin-top:8px; }
   .tools { display:grid; grid-template-columns:repeat(5,1fr); gap:5px; margin-top:8px; }
   .tools button, .tools a { margin:0; padding:10px 2px; font-size:11px; border-radius:12px; background:var(--card2); color:var(--fg);
                             text-decoration:none; text-align:center; font-weight:600; display:flex; flex-direction:column; gap:3px; align-items:center; }
@@ -130,6 +133,7 @@
   <div id="sub">Tap START to begin.</div>
 </header>
 
+<div id="resumeBox" hidden><b>Resume where you left off?</b>Tap anywhere or press any key (your 8BitDo works too) to start the camera again.<br><button id="resumeNo">No thanks</button></div>
 <section id="live">
   <div id="stage">
     <video id="video" playsinline muted autoplay></video>
@@ -157,9 +161,10 @@
 
   <div class="controls">
     <button id="btnStart" class="pri">▶ START<small>camera, sound, earbuds</small></button>
-    <button id="btnArm" disabled>● ARM<small>earbud: single press</small></button>
+    <button id="btnArm" disabled>▶ AUTO<small>auto reads paused — tap to start</small></button>
     <button id="btnForce" disabled>◎ CAPTURE NOW<small>earbud: double press</small></button>
     <button id="btnRepeat" disabled>↻ REPEAT<small>earbud: triple press</small></button>
+    <button id="btnStop" class="stop" disabled>■ STOP / RESET<small>silence · unfreeze · drop this read — hold to also pause auto</small></button>
   </div>
   <div class="tools">
     <button id="btnDraw"><span class="ico">⬚</span><span id="drawLbl">Crop box</span></button>
@@ -179,7 +184,7 @@
 <div id="reader" hidden>
   <div class="rbar"><button id="rClose">✕ Close</button><span><button id="rSmall">A−</button><button id="rBig">A+</button></span></div>
   <div id="rBody"><div id="rCard"></div><div id="rAnswer"></div><div id="rInfo" class="hint"></div>
-    <details><summary>Raw reply from Gemini</summary><pre id="rRaw"></pre></details></div>
+    <details><summary>Raw reply</summary><pre id="rRaw"></pre></details></div>
 </div>
 
 <h2 class="settings-title">Settings</h2>
@@ -194,7 +199,17 @@
 </details>
 
 <details>
-  <summary>Gemini</summary>
+  <summary>Who reads the card (Groq, Gemini)</summary>
+  <label>Answer with</label>
+  <select data-k="answerer">
+    <option value="groq">Groq first, Gemini as the fallback (default)</option>
+    <option value="gemini">Gemini only</option>
+    <option value="groqOnly">Groq only (no fallback)</option>
+  </select>
+  <div class="hint">Groq needs a <b>GROQ_API_KEY</b> secret in the Worker and Worker v9 (see the README, "Groq"). Until it has one, Gemini answers on its own — nothing breaks.</div>
+  <label>Groq models (comma-separated, blank = Worker default)</label>
+  <input type="text" data-k="groqModels" placeholder="meta-llama/llama-4-scout-17b-16e-instruct" autocapitalize="off" autocorrect="off">
+  <h2 style="margin-top:16px">Gemini (fallback)</h2>
   <label>Models to try, in order (comma-separated)</label>
   <input type="text" data-k="models" autocapitalize="off" autocorrect="off">
   <div class="hint">If the first is busy or fails, the next one is tried automatically.</div>
@@ -322,17 +337,17 @@
   This only works after START, while the app is open and nothing else is playing music.</div>
   <label>Single press</label>
   <select data-k="btnSingle">
-    <option value="toggle">Arm / disarm</option><option value="capture">Capture now</option>
-    <option value="repeat">Repeat last answer</option><option value="none">Nothing</option></select>
+    <option value="toggle">Auto reads on / pause</option><option value="capture">Capture now</option>
+    <option value="repeat">Repeat last answer</option><option value="stop">Stop / reset</option><option value="stopPause">Stop + pause auto</option><option value="none">Nothing</option></select>
   <label>Double press</label>
   <select data-k="btnDouble">
-    <option value="toggle">Arm / disarm</option><option value="capture">Capture now</option>
-    <option value="repeat">Repeat last answer</option><option value="none">Nothing</option></select>
+    <option value="toggle">Auto reads on / pause</option><option value="capture">Capture now</option>
+    <option value="repeat">Repeat last answer</option><option value="stop">Stop / reset</option><option value="stopPause">Stop + pause auto</option><option value="none">Nothing</option></select>
   <label>Triple press</label>
   <select data-k="btnTriple">
-    <option value="toggle">Arm / disarm</option><option value="capture">Capture now</option>
-    <option value="repeat">Repeat last answer</option><option value="none">Nothing</option></select>
-  <label class="chk"><input type="checkbox" data-k="autoArm"> Arm automatically when I tap START</label>
+    <option value="toggle">Auto reads on / pause</option><option value="capture">Capture now</option>
+    <option value="repeat">Repeat last answer</option><option value="stop">Stop / reset</option><option value="stopPause">Stop + pause auto</option><option value="none">Nothing</option></select>
+  <label class="chk"><input type="checkbox" data-k="autoArm"> Turn auto reads on when I tap START</label>
   <div class="hint" id="mediaInfo"></div>
 </details>
 
@@ -344,8 +359,10 @@
     <tr><td><kbd>Space</kbd> <kbd>Enter</kbd></td><td>START (before it runs) · then same as a single earbud press</td></tr>
     <tr><td><kbd>→</kbd> <kbd>Page Down</kbd> <kbd>N</kbd></td><td>Same as a double earbud press</td></tr>
     <tr><td><kbd>←</kbd> <kbd>Page Up</kbd> <kbd>P</kbd></td><td>Same as a triple earbud press</td></tr>
-    <tr><td><kbd>A</kbd></td><td>Arm / disarm</td></tr>
-    <tr><td><kbd>C</kbd></td><td>Capture now</td></tr>
+    <tr><td><kbd>A</kbd></td><td>Auto reads on / pause</td></tr>
+    <tr><td><kbd>C</kbd></td><td>Capture now (stops an auto read or answer in progress)</td></tr>
+    <tr><td><kbd>X</kbd> <kbd>Backspace</kbd></td><td>Stop / reset: silence, unfreeze, drop this read</td></tr>
+    <tr><td><kbd>Z</kbd></td><td>Stop + pause auto reads</td></tr>
     <tr><td><kbd>R</kbd></td><td>Repeat last answer</td></tr>
     <tr><td><kbd>S</kbd></td><td>Show mode on / off (or START)</td></tr>
     <tr><td><kbd>K</kbd></td><td>Restart camera</td></tr>
@@ -354,6 +371,7 @@
   <h2 style="margin-top:16px">Your own buttons (8BitDo, clicker…)</h2>
   <div class="hint">Tap <b>Learn</b>, then press the button you want. Works whether the pad acts as a keyboard or as a gamepad. Gamepad buttons work after START; they can't start the app (iOS needs a real tap or key for that).</div>
   <label class="chk"><input type="checkbox" data-k="gamepad"> Controller (gamepad) buttons on</label>
+  <label class="chk"><input type="checkbox" data-k="pressOverrides"> A capture press overrides auto reads (stops what's happening and reads now)</label>
   <div id="bindList"></div>
   <div class="hint" id="learnMsg"></div>
   <div class="hint" id="padInfo">No controller seen yet — press a button on it.</div>

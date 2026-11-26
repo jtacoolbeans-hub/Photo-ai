@@ -67,6 +67,29 @@ Make up a long random password, e.g. `blue-tiger-4417-lamp-orbit`. This is your
 > tries backup models when Gemini is busy and fixes the "invalid argument" error. Your
 > secrets stay as they are. The app shows ❌ *Worker is OUT OF DATE* until you do this.
 
+### Step 3b (optional, recommended): Groq reads the card first, Gemini is the fallback
+
+From version 1.15 the app asks **Groq** first (fast, with a free tier) and only falls back to **Gemini**
+if Groq is busy, fails or is slow. Until you add a Groq key, Gemini keeps answering on its own.
+
+1. On your iPhone, go to **console.groq.com** and sign up / sign in (free, no card).
+2. Tap the menu → **API Keys** → **Create API Key**. Name it `card-proxy`, tap **Submit**,
+   and **copy** the key (it starts with `gsk_`). It is shown only once: paste it into Notes for a minute.
+3. Update the Worker code: repeat **Step 3**, items 1–5 (paste the newest `worker/proxy.js`, tap **Deploy**).
+   It must be **version 9** or newer.
+4. In the Worker: **Settings** → **Variables and Secrets** → **Add**:
+   - Type **Secret**, name `GROQ_API_KEY`, value = the `gsk_…` key. Tap **Deploy** / **Save**.
+   - Optional: Type **Text**, name `GROQ_MODEL`, value = the vision model(s) to use, comma-separated.
+     Leave it out to use `meta-llama/llama-4-scout-17b-16e-instruct` (then Maverick as a backup).
+     Groq changes its model list from time to time: check **console.groq.com/docs/vision** for current
+     vision models if Groq starts failing with "model not found".
+5. Delete the key from Notes. Keep your `GEMINI_API_KEY`: it's the fallback.
+6. In the app, **Settings → Worker → Test connection** should show
+   **✅ Groq key stored — Groq answers first, Gemini is the fallback**.
+7. **Who reads the card** (in Settings) lets you choose *Groq first, Gemini fallback* (default),
+   *Gemini only*, or *Groq only*. Groq gets at most about 60% of the time limit, so Gemini still has
+   time to answer if Groq stalls. The capture log shows which one answered (`groq/…` or a Gemini model).
+
 ### Step 4: Turn on GitHub Pages
 
 1. On github.com, open this repo → **Settings** → **Pages**.
@@ -92,10 +115,10 @@ Make up a long random password, e.g. `blue-tiger-4417-lamp-orbit`. This is your
    On iPhone, all of these need one real tap.
 2. Tap **Draw crop box** and drag a box around where the card sits. Only that area is
    checked and sent, which means sharper text and faster uploads.
-3. **Arm** with a single earbud press (or the ARM button). The app then:
+3. Turn **AUTO** reads on with a single earbud press (or the AUTO button; tap again to pause). The app then:
    - watches for the picture to go **still**,
    - compares a few frames and keeps the **sharpest**,
-   - sends it to Gemini and **speaks the answer**,
+   - sends it to Groq (Gemini as the fallback) and **speaks the answer**,
    - waits for the card to **change** before reading again.
 4. Tap **SHOW MODE** for a black screen (double-tap the screen to exit).
 5. After the show, open **CAPTURE LOG** to see every capture.
@@ -104,17 +127,32 @@ Make up a long random password, e.g. `blue-tiger-4417-lamp-orbit`. This is your
 
 | Press | Default |
 |---|---|
-| Single (play/pause) | Arm / disarm |
+| Single (play/pause) | Auto reads on / pause |
 | Double (next track) | Capture now |
 | Triple (previous track) | Repeat last answer |
 
-These only work while the app is open and nothing else is playing audio.
+These only work while the app is open and nothing else is playing audio. Each press can also be set to
+**Stop / reset** or **Stop + pause auto**.
+
+### STOP / RESET, pausing auto reads, and overriding them (version 1.15)
+
+- **■ STOP / RESET** (red button, key **X** or **Backspace**): stops all sound at once (the answer, the stall
+  line, a repeat), cancels a read that is still thinking (its answer is thrown away), and unfreezes the picture.
+  The card that was being read isn't read again until it changes. Auto reads stay as they were.
+- **Hold STOP** for about a second (or key **Z**): the same, **and** auto reads are paused.
+- **⏸ PAUSE AUTO / ▶ AUTO** (key **A**): pauses or resumes automatic reads. It works any time, even while an
+  answer is being spoken: that answer finishes, then nothing new is read until you resume.
+- **Capture now** from any button (8BitDo in keyboard mode, a learned key, **C**, earbud double press) now
+  **overrides** whatever is happening: it stops an auto read or an answer in progress and reads the card in
+  front of the camera right away. Turn this off with **Keyboard & clicker → A capture press overrides auto reads**.
+- In **Keyboard & clicker → Your own buttons** you can also learn buttons for **Stop / reset** and
+  **Stop + pause auto reads**.
 
 ### Keyboard or Bluetooth clicker
 
 Works too (a page-turner just sends ordinary keys). **Space / Enter** = single earbud press,
-**→ / Page Down** = double, **← / Page Up** = triple. **A** arm/disarm, **C** capture,
-**R** repeat, **S** show mode, **K** restart camera, **Esc** leave show mode.
+**→ / Page Down** = double, **← / Page Up** = triple. **A** auto reads on/pause, **C** capture (overrides),
+**X** stop/reset, **Z** stop + pause auto, **R** repeat, **S** show mode, **K** restart camera, **Esc** leave show mode.
 
 ### What it does with the card
 
@@ -159,6 +197,15 @@ until you touch the page again. The app then shows an orange **Camera disconnect
 press any key, and it reconnects. It also keeps retrying quietly. If it keeps happening, use a **Safari tab**
 instead of the Home Screen icon (Home Screen apps re-ask for camera permission), and in Safari tap **aA →
 Website Settings → Camera → Allow**.
+
+**Swiping out and coming back (version 1.15).** When you return, the app clears any camera restart that iOS
+left hanging, wakes the sound and earbud buttons, reconnects the camera and gives it about a second to
+settle (exposure, focus, motion baseline) before judging anything. The card that was in view when you left is
+not read again unless it changes. If iOS wants a tap first, the orange panel shows: **any tap, any key or an
+8BitDo press** reconnects (that press only reconnects; it doesn't also capture). It keeps retrying every
+30 seconds while the app is open. If iOS threw the page away while you were gone (after a long time), a
+green **Resume where you left off?** box appears: tap anywhere or press any key and it starts again, with
+auto reads back on if they were on.
 
 ### Free voice: Cloudflare Workers AI (version 1.9, recommended)
 
