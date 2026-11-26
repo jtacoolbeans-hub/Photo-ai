@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.15.1';
+const APP_VERSION = '1.15.2';
 const MIN_WORKER_VERSION = 5;
 const RECOMMENDED_WORKER_VERSION = 9; // 9 = Groq reads the card first, Gemini as the fallback
 
@@ -1773,7 +1773,8 @@ async function runAudioCheck() {
     banner(t.n + ' of ' + total + ' — ' + t.name);
     if (t.kind === 'beep') { await beepNow('answer'); await sleep(600); log('1. Beep — played (Web Audio ' + c.state + ')'); continue; }
     if (t.kind === 'device') {
-      const r = await speakDeviceNow(names[t.n] + '. iPhone voice.');
+      holdLoop(true); // same set-up as a real answer (set-up 4 turns the background sound off while it talks)
+      let r; try { r = await speakDeviceNow(names[t.n] + '. iPhone voice.'); } finally { releaseLoop(); }
       log(t.n + '. iPhone voice — ' + (r.started ? 'started' + (r.error ? ', then error: ' + r.error : ' and finished') : 'did NOT start' + (r.error ? ' (' + r.error + ')' : '')));
       await wakeAudio(); continue;
     }
