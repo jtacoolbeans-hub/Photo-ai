@@ -288,6 +288,22 @@ tens of thousands of answers — check the amount on their sign-up page). It is 
 **Gemini voice** now accepts several models (comma-separated under **Gemini voice model**): each model has its own free
 quota, and when one is used up the next is tried.
 
+### Voices as priority blocks (version 1.18)
+
+**Speech & sounds → Voices** uses the same blocks as *Who reads the card*: **iPhone voice, Deepgram, Cloudflare,
+Gemini voice**. The top voice that is on and working speaks; if it won't start, is cut off, is used up or isn't set
+up, the next one carries on from where it stopped. Each block shows its state (**ready**, **used up for today**,
+**not set up**, **resting**) and has its own settings (iPhone voice, speed and lab set-up; Deepgram speaker; etc.).
+Your old *Voice engine* choice was turned into the same order.
+
+**Smoother iPhone voice.** It now speaks whole sentences (never splitting "2.0" or "Step 1:" in the middle, which
+caused the choppy pauses), and maths, physics and units are read in words: "v₁ = 2.0 m/s" → "v 1 equals 2.0 meters
+per second", "ΔP = ρgh" → "delta P equals rho g h", "3.2 × 10^5 J" → "3.2 times ten to the 5 joules". Turn that off
+with **Read maths, physics and units in words**. If the iPhone voice is cut off part-way, the next voice finishes
+**that whole answer** (no more switching back and forth), and the iPhone voice is back for the next card. For a much
+smoother sound, download an **Enhanced** or **Premium** voice (iPhone Settings → Accessibility → Spoken Content →
+Voices) and pick it in the iPhone voice block.
+
 ### If reading stops part-way
 
 The progress shows in the status line ("speaking 2 of 4"), and the sound log says how many pieces and characters each answer has.

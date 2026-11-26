@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.17.0';
+const APP_VERSION = '1.18.0';
 const MIN_WORKER_VERSION = 5;
 const RECOMMENDED_WORKER_VERSION = 11; // 11 = Claude, Groq and Gemini in the order you choose
 
@@ -118,6 +118,7 @@ const DEFAULTS = {
   mediaResolution: 'MEDIA_RESOLUTION_HIGH', thinking: 'minimal', maxTokens: 2048,
   prompt: DEFAULT_PROMPT, style: '', allItems: true,
   voiceEngine: 'device', dgVoice: 'aura-2-thalia-en', cfModel: '@cf/deepgram/aura-1', cfVoice: 'luna', ttsVoice: 'Kore', ttsModel: 'gemini-2.5-flash-preview-tts, gemini-2.5-pro-preview-tts',
+  voiceOrder: ['device', 'dg', 'cf', 'gemini'], voiceOn: { device: true, dg: true, cf: true, gemini: true }, mathSpeech: true, // voice priority blocks
   maxVoiceChars: 500, deviceFallback: true, cacheClips: true, deviceMode: 4, pauseLoopForSpeech: true, audioSessionMode: 'playback', freezeMode: 'speech',
   maxSide: 2048, jpegQuality: 85,
   timeoutSec: 8, stallLine: 'Great question. Give me just a second with that one.',
@@ -172,8 +173,16 @@ function loadSettings() {
   const order = saved.answerOrder.filter((w) => DEFAULTS.answerOrder.includes(w));
   for (const w of DEFAULTS.answerOrder) if (!order.includes(w)) order.push(w); // a new answerer added later goes at the bottom
   saved.answerOrder = order;
+  if (!Array.isArray(saved.voiceOrder)) { // 1.18: the old "Voice engine" choice becomes voice priority blocks, in the same order it already used
+    const ve = saved.voiceEngine || 'device', net = ['dg', 'cf', 'gemini'];
+    saved.voiceOrder = ve === 'device' ? ['device', ...net] : ve === 'auto' ? [...net, 'device'] : [ve, ...net.filter((e) => e !== ve), 'device'];
+    saved.voiceOn = { device: ve === 'device' || saved.deviceFallback !== false, dg: true, cf: true, gemini: true };
+  }
+  const vorder = saved.voiceOrder.filter((w) => DEFAULTS.voiceOrder.includes(w));
+  for (const w of DEFAULTS.voiceOrder) if (!vorder.includes(w)) vorder.push(w);
+  saved.voiceOrder = vorder;
   return { ...DEFAULTS, ...saved, v: SETTINGS_VER, crop: { ...DEFAULTS.crop, ...(saved.crop || {}) }, binds: { ...(saved.binds || {}) },
-           answerOn: { ...DEFAULTS.answerOn, ...(saved.answerOn || {}) } };
+           answerOn: { ...DEFAULTS.answerOn, ...(saved.answerOn || {}) }, voiceOn: { ...DEFAULTS.voiceOn, ...(saved.voiceOn || {}) } };
 }
 function saveSettings() { try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch {} }
 
@@ -198,7 +207,7 @@ function onSettingChanged(k) {
   if (k === 'camId' || k === 'res' || k === 'camFps') { safeMode = false; if (running) startCamera().catch((e) => { camNote = 'Camera error: ' + e.message; setSub(); }); }
   if (k === 'torch') applyTorch();
   if (k === 'useCrop') drawCropBox();
-  if (['stallLine', 'voiceEngine', 'ttsVoice', 'ttsModel', 'cfModel', 'cfVoice', 'dgVoice', 'workerUrl', 'token'].includes(k)) { resetEngines(); checkWorker().then(prewarmVoice); }
+  if (['stallLine', 'ttsVoice', 'ttsModel', 'cfModel', 'cfVoice', 'dgVoice', 'workerUrl', 'token'].includes(k)) { resetEngines(); checkWorker().then(prewarmVoice); }
   if (k === 'audioSessionMode') setAudioSession();
 }
 
@@ -291,10 +300,11 @@ function beepNow(name) {
 // ---------------------------------------------------------------- speech
 let speaking = false, deviceSpeaking = false, speakProg = null, speechChain = Promise.resolve(), speechNote = '';
 let speechEpoch = 0; // goes up when STOP is pressed: anything queued before that is dropped
+let deviceOffForAnswer = false, speakQueued = 0; // iPhone voice died mid-answer: don't switch back to it until this answer is over
 const liveSources = new Set(); // Web Audio voice pieces now playing, so STOP can cut them off
 function stopAllAudio() {
   speechEpoch++;
-  speechChain = Promise.resolve();
+  speechChain = Promise.resolve(); speakQueued = 0; deviceOffForAnswer = false;
   try { speechSynthesis.cancel(); } catch {}
   for (const src of liveSources) { try { src.stop(); } catch {} }
   liveSources.clear();
@@ -342,17 +352,68 @@ function releaseLoop() {
 function playLoop() { if (keepAlive && loopHold === 0 && !loopPausedForSpeech) keepAlive.play().catch(() => {}); }
 
 // Queue something to be said. Long text is split into sentences (iOS can cut off long utterances).
-function cleanSpeech(text) { // make written text sound right: no "---" lines, markdown, "m^2", "×", "≈", "°"
-  return String(text || '')
-    .replace(/\\(?:text|mathrm|mathbf|operatorname)\{([^}]*)\}/g, '$1')
-    .replace(/\\frac\{([^}]*)\}\{([^}]*)\}/g, '$1 over $2').replace(/\\sqrt\{([^}]*)\}/g, 'square root of $1')
-    .replace(/\\(omega|pi|theta|alpha|beta|gamma|delta|mu|sigma|lambda|phi)\b/g, ' $1 ').replace(/\\(?:cdot|times)\b/g, ' times ')
-    .replace(/\\[a-zA-Z]+/g, ' ').replace(/\^\{([^}]*)\}/g, ' to the power $1 ').replace(/_\{([^}]*)\}/g, ' $1 ').replace(/[$]|[{}]/g, '')
+// Units read in words after a number ("2.0 m/s" -> "2.0 meters per second"). Longest first. [pattern, singular, plural]
+const UNITS = [
+  ['m/s\\^?2|m/s²', 'meter per second squared', 'meters per second squared'], ['m/s', 'meter per second', 'meters per second'],
+  ['km/h|kph', 'kilometer per hour', 'kilometers per hour'], ['mph', 'mile per hour', 'miles per hour'], ['rad/s', 'radian per second', 'radians per second'],
+  ['kg/m\\^?3|kg/m³', 'kilogram per cubic meter', 'kilograms per cubic meter'], ['g/cm\\^?3|g/cm³', 'gram per cubic centimeter', 'grams per cubic centimeter'],
+  ['m\\^?3/s|m³/s', 'cubic meter per second', 'cubic meters per second'], ['L/s', 'liter per second', 'liters per second'], ['kg/s', 'kilogram per second', 'kilograms per second'],
+  ['N·m|N\\*m|N m(?=\\b)', 'newton meter', 'newton meters'], ['J/kg', 'joule per kilogram', 'joules per kilogram'], ['W/m\\^?2|W/m²', 'watt per square meter', 'watts per square meter'],
+  ['m\\^?2|m²', 'square meter', 'square meters'], ['cm\\^?2|cm²', 'square centimeter', 'square centimeters'], ['m\\^?3|m³', 'cubic meter', 'cubic meters'], ['cm\\^?3|cm³', 'cubic centimeter', 'cubic centimeters'],
+  ['kPa', 'kilopascal', 'kilopascals'], ['MPa', 'megapascal', 'megapascals'], ['GPa', 'gigapascal', 'gigapascals'], ['Pa', 'pascal', 'pascals'], ['atm', 'atmosphere', 'atmospheres'],
+  ['kJ', 'kilojoule', 'kilojoules'], ['MJ', 'megajoule', 'megajoules'], ['J', 'joule', 'joules'], ['eV', 'electron volt', 'electron volts'],
+  ['kWh', 'kilowatt hour', 'kilowatt hours'], ['MW', 'megawatt', 'megawatts'], ['kW', 'kilowatt', 'kilowatts'], ['W', 'watt', 'watts'],
+  ['kHz', 'kilohertz', 'kilohertz'], ['MHz', 'megahertz', 'megahertz'], ['Hz', 'hertz', 'hertz'],
+  ['kN', 'kilonewton', 'kilonewtons'], ['N', 'newton', 'newtons'], ['kg', 'kilogram', 'kilograms'], ['mg', 'milligram', 'milligrams'], ['g', 'gram', 'grams'],
+  ['km', 'kilometer', 'kilometers'], ['cm', 'centimeter', 'centimeters'], ['mm', 'millimeter', 'millimeters'], ['μm|µm', 'micrometer', 'micrometers'], ['nm', 'nanometer', 'nanometers'], ['m', 'meter', 'meters'],
+  ['ms', 'millisecond', 'milliseconds'], ['min', 'minute', 'minutes'], ['s', 'second', 'seconds'], ['hr|h', 'hour', 'hours'],
+  ['mA', 'milliamp', 'milliamps'], ['A', 'amp', 'amps'], ['kV', 'kilovolt', 'kilovolts'], ['mV', 'millivolt', 'millivolts'], ['V', 'volt', 'volts'],
+  ['kΩ', 'kilohm', 'kilohms'], ['Ω', 'ohm', 'ohms'], ['μF|µF', 'microfarad', 'microfarads'], ['F', 'farad', 'farads'], ['T', 'tesla', 'tesla'],
+  ['°C|° C', 'degree Celsius', 'degrees Celsius'], ['°F', 'degree Fahrenheit', 'degrees Fahrenheit'], ['K', 'kelvin', 'kelvin'],
+  ['mL|ml', 'milliliter', 'milliliters'], ['L', 'liter', 'liters'], ['mol', 'mole', 'moles'], ['rad', 'radian', 'radians'], ['rpm', 'R P M', 'R P M'],
+].map(([p, one, many]) => [new RegExp('(\\d(?:[\\d,]*\\d)?(?:\\.\\d+)?)\\s?(?:' + p + ')(?![\\w²³/])', 'g'), one, many]);
+const GREEK = { α: 'alpha', β: 'beta', γ: 'gamma', δ: 'delta', Δ: 'delta', ε: 'epsilon', η: 'eta', θ: 'theta', λ: 'lambda', μ: 'mu', µ: 'mu', ν: 'nu',
+  π: 'pi', ρ: 'rho', σ: 'sigma', Σ: 'sum of', τ: 'tau', φ: 'phi', ω: 'omega', Ω: 'omega' };
+const SUB = '₀₁₂₃₄₅₆₇₈₉', SUP = { '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4', '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9', '⁻': '-' };
+// Make written text sound right when spoken: no markdown, and maths, physics and units in words, so the voice
+// reads "v equals 2.0 meters per second" instead of spelling symbols or stumbling. (Safe to run twice.)
+function cleanSpeech(text) {
+  let t = String(text || '');
+  if (S.mathSpeech !== false) {
+    t = t.replace(/\\(?:text|mathrm|mathbf|operatorname)\{([^}]*)\}/g, '$1')
+      .replace(/\\frac\{([^}]*)\}\{([^}]*)\}/g, '$1 over $2').replace(/\\sqrt\{([^}]*)\}/g, 'the square root of $1')
+      .replace(/\\(omega|pi|theta|alpha|beta|gamma|delta|mu|sigma|lambda|phi|rho|eta|tau|epsilon)\b/gi, ' $1 ').replace(/\\(?:cdot|times)\b/g, ' times ')
+      .replace(/\\approx\b/g, ' about ').replace(/\\pm\b/g, ' plus or minus ').replace(/\\[a-zA-Z]+/g, ' ')
+      .replace(/\^\{([^}]*)\}/g, '^($1)').replace(/_\{([^}]*)\}/g, ' $1 ').replace(/\$(\d[\d,]*(?:\.\d+)?)/g, '$1 dollars').replace(/[$]/g, '').replace(/[{}]/g, '')
+      // superscript / subscript characters: 10⁻³ -> 10^(-3), v₁ -> v 1
+      .replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹⁻]+/g, (m) => (m === '²' || m === '³' ? m : '^(' + [...m].map((c) => SUP[c]).join('') + ')'))
+      .replace(/[₀-₉]+/g, (m) => ' ' + [...m].map((c) => SUB.indexOf(c)).join('') + ' ')
+      // scientific notation: 3.2 × 10^5, 3.2x10^-5, 3.2e5
+      .replace(/(\d(?:\.\d+)?)\s*[×x*·]\s*10\s*\^\s*\(?\s*([-−]?\d+)\s*\)?/g, (m, a, e) => a + ' times ten to the ' + e.replace(/[-−]/, 'minus ') + ' ')
+      .replace(/\b(\d(?:\.\d+)?)[eE]([-+]?\d+)\b/g, (m, a, e) => a + ' times ten to the ' + e.replace('-', 'minus ').replace('+', '') + ' ');
+    t = t.replace(/[ \t]{2,}/g, ' ');
+    for (const [re, one, many] of UNITS) t = t.replace(re, (m, n) => n + ' ' + (n === '1' || n === '1.0' ? one : many));
+    t = t.replace(/([A-Za-z])_([A-Za-z0-9]+)/g, '$1 $2') // v_1 -> v 1
+      .replace(/√\s*\(([^)]*)\)/g, 'the square root of $1').replace(/√\s*(\S+)/g, 'the square root of $1')
+      .replace(/[αβγδΔεηλμµνπρσΣτφωΩ]/g, (c) => ' ' + GREEK[c] + ' ')
+      .replace(/\s*≈\s*/g, ' is about ').replace(/\s*≠\s*/g, ' is not equal to ').replace(/\s*±\s*/g, ' plus or minus ')
+      .replace(/\s*≤\s*/g, ' is at most ').replace(/\s*≥\s*/g, ' is at least ').replace(/\s*∝\s*/g, ' is proportional to ').replace(/∞/g, ' infinity ')
+      .replace(/\s*(?:→|⇒|➜|=>)\s*/g, ', so ')
+      .replace(/\^2(?![\d])/g, ' squared').replace(/\^3(?![\d])/g, ' cubed').replace(/²/g, ' squared').replace(/³/g, ' cubed')
+      .replace(/\^\(?\s*([-−]?[\w.]+)\s*\)?/g, (m, e) => ' to the power ' + e.replace(/[-−]/, 'minus ') + ' ')
+      .replace(/\s*×\s*/g, ' times ').replace(/\s*÷\s*/g, ' divided by ').replace(/(\S)\s*[·*]\s*(?=\S)/g, '$1 times ')
+      .replace(/\s+=\s+|(?<=[\w)])=(?=[\w(])/g, ' equals ')
+      .replace(/(?<=[\w)])\s*\+\s*(?=[\w(])/g, ' plus ').replace(/\s+[−–-]\s+(?=[\w(])/g, ' minus ').replace(/−/g, ' minus ')
+      .replace(/(?<=\s)<(?=\s)/g, 'is less than').replace(/(?<=\s)>(?=\s)/g, 'is greater than')
+      .replace(/([\w)])\s*\/\s*([\w(])/g, '$1 over $2') // a/b, after units are done
+      .replace(/\s*\(\s*/g, ', ').replace(/\s*\)\s*(?=[.,;:!?]|$)/g, '').replace(/\s*\)\s*/g, ', '); // brackets become short pauses
+  }
+  return t
     .replace(/^\s*[-=_*~]{3,}\s*$/gm, ' ')
+    .replace(/([^.!?:;,\s])\s*\n+/g, '$1. ') // a line break is a pause: end the line like a sentence
     .replace(/[*_#`>]/g, '')
-    .replace(/\^2(?![\d])/g, ' squared').replace(/\^3(?![\d])/g, ' cubed').replace(/\^\(?(-?[\d.]+)\)?/g, ' to the power $1')
-    .replace(/×/g, ' times ').replace(/÷/g, ' divided by ').replace(/≈/g, ' about ').replace(/≤/g, ' at most ').replace(/≥/g, ' at least ')
-    .replace(/°/g, ' degrees').replace(/[→⇒➜]/g, ' ').replace(/\s+–\s+|\s+—\s+/g, ', ')
+    .replace(/°/g, ' degrees').replace(/\s+–\s+|\s+—\s+/g, ', ')
+    .replace(/\s+([.,;:!?])/g, '$1').replace(/([,;:])(?:\s*[,;:])+/g, '$1').replace(/,\s*\./g, '.')
     .replace(/\s+/g, ' ').trim();
 }
 function speak(text) {
@@ -366,12 +427,13 @@ function speak(text) {
     const first = voiceOrder()[0];
     const jobs = isParallel(first) ? pieces.map((c) => voiceJob(c, { engine: first })) : [];
     const ep = speechEpoch;
+    speakQueued++;
     speechChain = speechChain.then(async () => {
       if (ep !== speechEpoch) return;
       speaking = true; setSub();
       sev('speaking ' + pieces.length + ' piece' + (pieces.length > 1 ? 's' : '') + ', ' + text.length + ' characters');
       try { for (let i = 0; i < pieces.length && ep === speechEpoch; i++) { speakProg = { i: i + 1, n: pieces.length }; setSub(); await playVoice(pieces[i], jobs[i], i < pieces.length - 1, ep); } }
-      finally { if (ep === speechEpoch) { speaking = false; speakProg = null; setSub(); } }
+      finally { if (ep === speechEpoch) { speaking = false; speakProg = null; if (--speakQueued <= 0) { speakQueued = 0; deviceOffForAnswer = false; } setSub(); } }
     });
     return speechChain;
   }
@@ -412,10 +474,21 @@ function splitSpeech(text) {
 }
 
 // The iPhone's own voice (speechSynthesis). Resolves with what happened, for the audio check.
-function deviceChunks(text) { // short pieces (one sentence or so): iOS keeps these alive much better than one long utterance
-  const parts = String(text).match(/[^.!?;:\n]+[.!?;:]*\s*/g) || [text], out = [];
-  for (const p of parts) { const t = p.trim(); if (!t) continue; if (out.length && (out[out.length - 1] + ' ' + t).length <= 90) out[out.length - 1] += ' ' + t; else out.push(t); }
-  return out;
+function deviceChunks(text, max = 150) { // whole sentences, a few together: iOS keeps short pieces alive better than one long utterance
+  // Cut only at a sentence end FOLLOWED BY A SPACE, so "2.0", "9.81" and "Step 1: …" are never split in the middle.
+  const sents = String(text).replace(/([.!?])\s+/g, '$1\u0001').replace(/\n+/g, '\u0001').split('\u0001').map((x) => x.trim()).filter(Boolean);
+  const out = [];
+  for (let sent of sents) {
+    while (sent.length > max) { // one very long sentence: break at a comma or semicolon (a natural pause), else a space
+      let cut = Math.max(sent.lastIndexOf(', ', max), sent.lastIndexOf('; ', max));
+      if (cut < 40) cut = sent.lastIndexOf(' ', max);
+      if (cut < 20) cut = max;
+      out.push(sent.slice(0, cut + 1).trim()); sent = sent.slice(cut + 1).trim();
+    }
+    if (!sent) continue;
+    if (out.length && (out[out.length - 1] + ' ' + sent).length <= max) out[out.length - 1] += ' ' + sent; else out.push(sent);
+  }
+  return out.length ? out : [String(text)];
 }
 async function speakDevice(text) { // piece by piece; if a piece dies, report exactly how far we got
   const pieces = deviceChunks(text); let off = 0, any = false; const ep = speechEpoch;
@@ -565,7 +638,7 @@ async function checkWorker() {
   else if (!workerInfo.ai) engineDown.cf = 'not connected — add a Workers AI binding to the Worker';
   else engineDown.cf = '';
   sev('Worker v' + (workerInfo.version || '?') + (workerInfo.ai ? ', Cloudflare voice connected' : ', no Cloudflare voice') + (workerInfo.dg ? ', Deepgram voice set up' : '') + ', answers: ' + (answerers().filter((w) => workerInfo[w === 'gemini' ? 'hasKey' : w]).join(' → ') || 'nobody has a key!'));
-  renderAnswerBlocks();
+  renderAnswerBlocks(); renderVoiceBlocks();
   setSub();
   return workerInfo;
 }
@@ -574,13 +647,11 @@ function netVoice() { return !!S.workerUrl; } // the voice chain (iPhone voice a
 const isParallel = (e) => e === 'cf' || e === 'dg'; // these are cheap and quick enough to start all at once
 const engineBackoff = { dg: 0, cf: 0, gemini: 0, device: 0 }, engineFails = { dg: 0, cf: 0, gemini: 0, device: 0 }; // temporary pauses (a failing voice isn't hammered)
 function resetEngines() { for (const e of Object.keys(engineDown)) { engineDown[e] = ''; engineBackoff[e] = 0; engineFails[e] = 0; } }
-function voiceOrder() { // your choice first, the others as backup. "iPhone voice": it first, the online voices only if it will not start.
+function firstVoice() { return S.voiceOrder.find((e) => S.voiceOn[e]) || 'device'; }
+function voiceOrder() { // your voice blocks, top first; the ones below are the backup
   if (!S.workerUrl) return ['device']; // no Worker: only the iPhone voice is possible
-  const net = ['dg', 'cf', 'gemini'];
-  const pref = S.voiceEngine === 'device' ? ['device', ...net]
-    : S.voiceEngine === 'auto' ? [...net, 'device']
-    : [S.voiceEngine, ...net.filter((e) => e !== S.voiceEngine), 'device'];
-  const list = pref.filter((e) => (e === 'device' ? (S.voiceEngine === 'device' || S.deviceFallback !== false) : !engineDown[e]));
+  const list = S.voiceOrder.filter((e) => S.voiceOn[e] && (e === 'device' ? !deviceOffForAnswer : !engineDown[e]));
+  if (!list.length) return S.voiceOn.device || !S.voiceOrder.some((e) => S.voiceOn[e]) ? ['device'] : S.voiceOrder.filter((e) => S.voiceOn[e]); // never go silent
   const live = list.filter((e) => Date.now() >= engineBackoff[e]);
   return live.length ? live : list; // if every voice is pausing, still try rather than stay silent
 }
@@ -626,7 +697,7 @@ async function playVoice(text, firstJob, more = false, ep = speechEpoch) {
         if (r.started) { // it spoke part of it, then iOS cut it off: the online voice carries on from there, not from the start
           const rest = text.slice(Math.max(0, r.spokenChars)).trim();
           errs.push('iPhone voice stopped part-way');
-          engineBackoff.device = Date.now() + 60000; sev('iPhone voice stopped after ' + r.spokenChars + ' characters — online voice continues; iPhone voice rests 1 min');
+          engineBackoff.device = Date.now() + 60000; deviceOffForAnswer = true; sev('iPhone voice stopped after ' + r.spokenChars + ' characters — the online voice finishes this answer; iPhone voice rests 1 min');
           if (!rest) return;
           text = rest; firstJob = null;
         } else {
@@ -657,7 +728,7 @@ async function playVoice(text, firstJob, more = false, ep = speechEpoch) {
   }
   if (ep !== speechEpoch) return;
   if (!errs.length) { // every voice was already ruled out this session: say why
-    if (engineDown.dg && S.voiceEngine === 'dg') errs.push('Deepgram: ' + engineDown.dg);
+    if (engineDown.dg && S.voiceOn.dg) errs.push('Deepgram: ' + engineDown.dg);
     if (engineDown.cf) errs.push('Cloudflare: ' + engineDown.cf);
     if (engineDown.gemini) errs.push('Gemini: ' + engineDown.gemini);
   }
@@ -787,14 +858,14 @@ function unlockSpeech() {
     const u = new SpeechSynthesisUtterance('Ready');
     const v = speechSynthesis.getVoices().find((x) => x.voiceURI === S.voiceURI);
     if (v) u.voice = v;
-    u.lang = (v && v.lang) || 'en-US'; u.volume = (S.sayReady && S.voiceEngine === 'device') ? 1 : 0.01;
+    u.lang = (v && v.lang) || 'en-US'; u.volume = (S.sayReady && firstVoice() === 'device') ? 1 : 0.01;
     liveUtterances.add(u); u.onend = u.onerror = () => liveUtterances.delete(u);
     speechSynthesis.speak(u);
   } catch {}
   setAudioSession();
 }
 function setAudioSession() { // "playback" lets sound play even with the ringer switch on silent (iOS 16.4+)
-  try { if (navigator.audioSession) navigator.audioSession.type = S.voiceEngine === 'device' ? deviceMode().session : (S.audioSessionMode === 'auto' ? 'auto' : 'playback'); } catch {}
+  try { if (navigator.audioSession) navigator.audioSession.type = firstVoice() === 'device' ? deviceMode().session : (S.audioSessionMode === 'auto' ? 'auto' : 'playback'); } catch {}
 }
 function updateSpeechInfo() {
   $('speechInfo').textContent = 'Voices on this phone: ' + speechSynthesis.getVoices().length + (speechNote ? '\n⚠ ' + speechNote : '');
@@ -1779,7 +1850,7 @@ async function runAudioCheck() {
   if (S.workerUrl && workerInfo) {
     if (workerInfo.dg) acTests.push({ kind: 'dg', name: 'Deepgram voice' });
     if (workerInfo.ai) acTests.push({ kind: 'cf', name: 'Cloudflare voice' });
-    if (S.voiceEngine === 'gemini') acTests.push({ kind: 'gemini', name: 'Gemini voice' });
+    if (S.voiceOn.gemini && workerInfo.hasKey) acTests.push({ kind: 'gemini', name: 'Gemini voice' });
   }
   acTests.push({ kind: 'device', name: 'iPhone voice' });
   acTests.forEach((t, i) => { t.n = i + 1; });
@@ -1847,13 +1918,13 @@ $('btnAudioCheck').onclick = () => { runAudioCheck().catch((e) => { $('acBanner'
 $('acApply').onclick = () => {
   const heard = new Set(acTests.filter((t) => { const el = $('acH' + t.n); return el && el.checked; }).map((t) => t.kind));
   let msg;
-  if (heard.has('dg')) { S.voiceEngine = 'auto'; msg = 'Set: automatic — the Deepgram voice first, then Cloudflare, Gemini and the iPhone voice as backup.'; }
-  else if (heard.has('cf')) { S.voiceEngine = 'cf'; msg = 'Set: Cloudflare voice. Its free allowance is small (about 7,000 characters a day); a Deepgram key would give you far more (see the README).'; }
-  else if (heard.has('gemini')) { S.voiceEngine = 'gemini'; msg = 'Set: Gemini voice. Its free limit is small (about 10 lines a day).'; }
-  else if (heard.has('device')) { S.voiceEngine = 'device'; S.pauseLoopForSpeech = true; S.audioSessionMode = 'playback'; msg = 'Set: iPhone voice (unlimited and free).'; }
+  if (heard.has('dg')) { setVoiceFirst('dg'); msg = 'Set: Deepgram voice on top (see Voices); the blocks below it are the backup.'; }
+  else if (heard.has('cf')) { setVoiceFirst('cf'); msg = 'Set: Cloudflare voice. Its free allowance is small (about 7,000 characters a day); a Deepgram key would give you far more (see the README).'; }
+  else if (heard.has('gemini')) { setVoiceFirst('gemini'); msg = 'Set: Gemini voice. Its free limit is small (about 10 lines a day).'; }
+  else if (heard.has('device')) { setVoiceFirst('device'); S.pauseLoopForSpeech = true; S.audioSessionMode = 'playback'; msg = 'Set: iPhone voice (unlimited and free).'; }
   else msg = 'Nothing worked yet. Check: the silent switch on the left side of the phone (orange = silent), the volume while something plays, and Control Center → the audio-output icon is set to your earbuds. Then run the check again.';
   if (!heard.has('beep')) msg += ' You also did not hear the beep — check the volume and that the earbuds are the audio output.';
-  saveSettings(); syncInputs(['voiceEngine', 'pauseLoopForSpeech', 'audioSessionMode']); setAudioSession();
+  saveSettings(); syncInputs(['pauseLoopForSpeech', 'audioSessionMode']); renderVoiceBlocks(); setAudioSession();
   resetEngines(); checkWorker().then(prewarmVoice);
   acReport += '\nHeard: ' + (acTests.filter((t) => heard.has(t.kind)).map((t) => t.n).join(', ') || 'nothing') + '\n' + msg;
   $('acMsg').textContent = msg;
@@ -1863,10 +1934,10 @@ $('labApply').onclick = () => {
   const ids = LAB_VARIANTS.filter((v) => { const el = $('labH' + v.id); return el && el.checked; }).map((v) => v.id);
   let msg;
   if (ids.length) {
-    S.deviceMode = ids[0]; S.voiceEngine = 'device'; S.deviceFallback = true;
-    msg = 'Set: iPhone voice, set-up ' + ids[0] + ' (' + LAB_VARIANTS[ids[0] - 1].label + '). It is unlimited and free. If answers sound late or quiet, switch back under Speech & sounds → Voice engine.';
+    S.deviceMode = ids[0]; setVoiceFirst('device');
+    msg = 'Set: iPhone voice on top, set-up ' + ids[0] + ' (' + LAB_VARIANTS[ids[0] - 1].label + '). It is unlimited and free. To change the order, use the Voices blocks.';
   } else msg = 'Nothing was audible. Flip the silent switch (left side of the phone: show orange = silent, hide orange = sound), make sure the earbuds are the audio output in Control Center, and run the lab again. Then use Copy report and paste it to Claude.';
-  saveSettings(); syncInputs(['voiceEngine']); setAudioSession(); resetEngines();
+  saveSettings(); syncInputs(['deviceMode']); renderVoiceBlocks(); setAudioSession(); resetEngines();
   labReport += '\nHeard: ' + (ids.join(', ') || 'nothing') + '\n' + msg;
   $('labMsg').textContent = msg;
 };
@@ -1879,7 +1950,7 @@ $('acCopy').onclick = async () => {
   catch { $('acMsg').textContent = 'Could not copy automatically — long-press the report above to select it.'; }
 };
 $('btnCopyEvents').onclick = async () => {
-  const txt = 'App ' + APP_VERSION + ' · voice: ' + S.voiceEngine + ' · pause background: ' + S.pauseLoopForSpeech + '\n' + sevents.join('\n');
+  const txt = 'App ' + APP_VERSION + ' · voices: ' + S.voiceOrder.filter((e) => S.voiceOn[e]).join(' → ') + ' · pause background: ' + S.pauseLoopForSpeech + '\n' + sevents.join('\n');
   try { await navigator.clipboard.writeText(txt); $('speechInfo').textContent = 'Sound log copied — paste it into the chat.'; }
   catch { $('speechInfo').textContent = txt; }
 };
@@ -2103,48 +2174,75 @@ $('speedPreset').addEventListener('change', () => {
   saveSettings();
 });
 
-// ---------------------------------------------------------------- who reads the card: priority blocks
+// ---------------------------------------------------------------- priority blocks (who reads the card, which voice speaks)
+// One list of blocks per job: top block that is on (and can work) goes first, the rest are the backup.
 const ANSWER_NAMES = { claude: 'Claude', groq: 'Groq', gemini: 'Gemini' };
-function renderAnswerBlocks() {
-  const box = $('answerBlocks'); if (!box) return;
-  const keyOf = (w) => (workerInfo ? !!workerInfo[w === 'gemini' ? 'hasKey' : w] : null);
-  const order = S.answerOrder, firstOn = order.find((w) => S.answerOn[w] && keyOf(w) !== false); // who will really answer first
+const VOICE_NAMES = { device: 'iPhone voice', dg: 'Deepgram', cf: 'Cloudflare', gemini: 'Gemini voice' };
+function answerStatus(w) { // [text, 'ok' | 'no' | '']
+  if (!workerInfo) return ['', ''];
+  return workerInfo[w === 'gemini' ? 'hasKey' : w] ? ['● key set', 'ok'] : ['● no key', 'no'];
+}
+function voiceStatus(e) {
+  const resting = Date.now() < engineBackoff[e];
+  if (e === 'device') return deviceOffForAnswer ? ['● sitting out this answer', 'no'] : resting ? ['● resting a minute', 'no'] : ['● ready', 'ok'];
+  if (!S.workerUrl) return ['● needs the Worker', 'no'];
+  if (engineDown[e]) return ['● ' + (/limit|used up|credits/i.test(engineDown[e]) ? 'used up for today' : /not set up|no .*key|not connected/i.test(engineDown[e]) ? 'not set up' : 'unavailable'), 'no'];
+  if (resting) return ['● resting', 'no'];
+  if (!workerInfo) return ['', ''];
+  const ok = { dg: workerInfo.dg, cf: workerInfo.ai, gemini: workerInfo.hasKey }[e];
+  return ok ? ['● ready', 'ok'] : ['● not set up', 'no'];
+}
+const BLOCK_SETS = {
+  answer: { box: 'answerBlocks', summary: 'answerSummary', order: 'answerOrder', on: 'answerOn', names: ANSWER_NAMES, status: answerStatus,
+            off: '⚠ Everything is switched off: cards can\'t be read.' },
+  voice: { box: 'voiceBlocks', summary: 'voiceSummary', order: 'voiceOrder', on: 'voiceOn', names: VOICE_NAMES, status: voiceStatus,
+           off: '⚠ Every voice is off: the iPhone voice will still be tried so you are never left in silence.', changed: () => { setAudioSession(); prewarmVoice(); } }, // keeps what it knows (a voice used up today stays skipped)
+};
+function renderBlocks(kind) {
+  const c = BLOCK_SETS[kind], box = $(c.box); if (!box) return;
+  const order = S[c.order], on = S[c.on];
+  const usable = (w) => on[w] && c.status(w)[1] !== 'no';
+  const lead = order.find(usable) || order.find((w) => on[w]);
   order.forEach((w, i) => {
     const b = box.querySelector('[data-who="' + w + '"]'); if (!b) return;
     box.appendChild(b); // DOM order follows the saved order
     b.querySelector('.anum').textContent = i + 1;
     b.querySelector('.aup').disabled = i === 0;
     b.querySelector('.adown').disabled = i === order.length - 1;
-    b.querySelector('.aon').checked = !!S.answerOn[w];
-    b.classList.toggle('off', !S.answerOn[w]);
-    b.classList.toggle('first', w === firstOn);
-    const k = b.querySelector('.akey');
-    const has = keyOf(w);
-    k.textContent = has == null ? '' : has ? '● key set' : '● no key';
-    k.className = 'akey' + (has == null ? '' : has ? ' ok' : ' no');
+    b.querySelector('.aon').checked = !!on[w];
+    b.classList.toggle('off', !on[w]);
+    b.classList.toggle('first', w === lead);
+    const [txt, cls] = c.status(w), k = b.querySelector('.akey');
+    k.textContent = txt; k.className = 'akey' + (cls ? ' ' + cls : '');
   });
-  const on = answerers();
-  $('answerSummary').textContent = on.length ? 'Order now: ' + on.map((w) => ANSWER_NAMES[w] + (keyOf(w) === false ? ' (no key, skipped)' : '')).join(' → ') : '⚠ Everything is switched off: cards can\'t be read.';
+  const list = order.filter((w) => on[w]);
+  $(c.summary).textContent = list.length ? 'Order now: ' + list.map((w) => c.names[w] + (c.status(w)[1] === 'no' ? ' (' + c.status(w)[0].replace('● ', '') + ', skipped)' : '')).join(' → ') : c.off;
 }
-function wireAnswerBlocks() {
-  const box = $('answerBlocks'); if (!box) return;
+function wireBlocks(kind) {
+  const c = BLOCK_SETS[kind], box = $(c.box); if (!box) return;
+  const changed = () => { saveSettings(); renderBlocks(kind); if (c.changed) c.changed(); };
   box.querySelectorAll('.ablock').forEach((b) => {
     const w = b.dataset.who;
     const move = (d) => {
-      const o = S.answerOrder.slice(), i = o.indexOf(w), j = i + d;
+      const o = S[c.order].slice(), i = o.indexOf(w), j = i + d;
       if (j < 0 || j >= o.length) return;
-      [o[i], o[j]] = [o[j], o[i]]; S.answerOrder = o; saveSettings(); renderAnswerBlocks();
+      [o[i], o[j]] = [o[j], o[i]]; S[c.order] = o; changed();
+      b.classList.remove('moved'); void b.offsetWidth; b.classList.add('moved'); // a little flash so you see where it went
     };
     b.querySelector('.aup').onclick = () => move(-1);
     b.querySelector('.adown').onclick = () => move(1);
-    b.querySelector('.aon').onchange = (e) => { S.answerOn = { ...S.answerOn, [w]: e.target.checked }; saveSettings(); renderAnswerBlocks(); };
-    b.querySelector('.aname').onclick = () => { const body = b.querySelector('.abody'); body.hidden = !body.hidden; };
+    b.querySelector('.aon').onchange = (e) => { S[c.on] = { ...S[c.on], [w]: e.target.checked }; changed(); };
+    b.querySelector('.aname').onclick = () => { const body = b.querySelector('.abody'); body.hidden = !body.hidden; b.classList.toggle('open', !body.hidden); };
   });
-  renderAnswerBlocks();
+  renderBlocks(kind);
 }
+function renderAnswerBlocks() { renderBlocks('answer'); }
+function renderVoiceBlocks() { renderBlocks('voice'); }
+function setVoiceFirst(e) { S.voiceOrder = [e, ...S.voiceOrder.filter((x) => x !== e)]; S.voiceOn = { ...S.voiceOn, [e]: true }; }
+setInterval(() => { if (!document.hidden && $('voiceBlocks') && $('voiceBlocks').offsetParent) renderVoiceBlocks(); }, 3000); // resting / used-up badges change over time
 
 function init() {
-  wireAnswerBlocks();
+  wireBlocks('answer'); wireBlocks('voice');
   buildCueSettings();
   buildBindUI();
   updateSpeechInfo();

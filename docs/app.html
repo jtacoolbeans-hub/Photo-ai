@@ -96,15 +96,19 @@
   table.keys { width:100%; border-collapse:collapse; margin-top:8px; font-size:14px; }
   table.keys td { padding:6px 4px; border-top:1px solid var(--line); vertical-align:top; } table.keys td:first-child { white-space:nowrap; }
   kbd { background:#000; border:1px solid var(--line); border-radius:5px; padding:1px 6px; font:12px ui-monospace, Menlo, monospace; }
-  #answerBlocks { margin-top:10px; display:flex; flex-direction:column; gap:8px; }
+  .blocks { margin-top:10px; display:flex; flex-direction:column; gap:8px; }
   .ablock { background:var(--bg); border:1px solid var(--line); border-radius:14px; padding:10px 12px; transition:opacity .2s; }
   .ablock.first { border-color:var(--acc); box-shadow:0 0 0 1px var(--acc) inset; }
   .ablock.off { opacity:.45; }
   .ahead2 { display:flex; align-items:center; gap:8px; }
   .anum { flex:0 0 26px; height:26px; border-radius:50%; background:var(--card2); color:var(--fg); font-weight:700; font-size:14px; display:flex; align-items:center; justify-content:center; }
   .ablock.first .anum { background:var(--acc); color:#000; }
-  .aname { flex:1; text-align:left; background:none; border:0; color:var(--fg); font-size:17px; font-weight:700; padding:6px 0; margin:0; }
-  .akey { font-size:12px; font-weight:500; color:var(--mut); margin-left:6px; }
+  .aname { flex:1; min-width:0; text-align:left; background:none; border:0; color:var(--fg); font-size:17px; font-weight:700; padding:4px 0; margin:0; line-height:1.2; }
+  .asub { display:block; font-size:12px; font-weight:500; color:var(--mut); margin-top:2px; }
+  .akey { display:block; font-size:12px; font-weight:600; color:var(--mut); margin-top:2px; }
+  .ablock.moved { animation:amoved .5s ease; }
+  @keyframes amoved { from { background:rgba(79,163,255,.25); } to { background:var(--bg); } }
+  .ablock.open { background:var(--card2); }
   .akey.ok { color:var(--ok); } .akey.no { color:var(--warn); }
   .amove button { margin:0 0 0 4px; padding:6px 10px; font-size:13px; border-radius:8px; background:var(--card2); color:var(--fg); }
   .amove button:disabled { opacity:.25; }
@@ -219,9 +223,9 @@
 <details>
   <summary>Who reads the card (Claude, Groq, Gemini)</summary>
   <div class="hint">Top block answers first. If it's off, has no key in the Worker, fails or runs slow, the next one takes over. Use ▲ ▼ to change the order, the switch to turn one off, and tap a name for its settings.</div>
-  <div id="answerBlocks">
+  <div id="answerBlocks" class="blocks">
     <div class="ablock" data-who="claude">
-      <div class="ahead2"><span class="anum"></span><button class="aname" type="button">Claude <span class="akey"></span></button>
+      <div class="ahead2"><span class="anum"></span><button class="aname" type="button">Claude<small class="asub">smartest · paid per card</small><span class="akey"></span></button>
         <span class="amove"><button type="button" class="aup" aria-label="Move up">▲</button><button type="button" class="adown" aria-label="Move down">▼</button></span>
         <label class="aswitch"><input type="checkbox" class="aon"><i></i></label></div>
       <div class="abody" hidden>
@@ -242,7 +246,7 @@
       </div>
     </div>
     <div class="ablock" data-who="groq">
-      <div class="ahead2"><span class="anum"></span><button class="aname" type="button">Groq <span class="akey"></span></button>
+      <div class="ahead2"><span class="anum"></span><button class="aname" type="button">Groq<small class="asub">fastest · free tier</small><span class="akey"></span></button>
         <span class="amove"><button type="button" class="aup" aria-label="Move up">▲</button><button type="button" class="adown" aria-label="Move down">▼</button></span>
         <label class="aswitch"><input type="checkbox" class="aon"><i></i></label></div>
       <div class="abody" hidden>
@@ -265,7 +269,7 @@
       </div>
     </div>
     <div class="ablock" data-who="gemini">
-      <div class="ahead2"><span class="anum"></span><button class="aname" type="button">Gemini <span class="akey"></span></button>
+      <div class="ahead2"><span class="anum"></span><button class="aname" type="button">Gemini<small class="asub">reliable · free tier</small><span class="akey"></span></button>
         <span class="amove"><button type="button" class="aup" aria-label="Move up">▲</button><button type="button" class="adown" aria-label="Move down">▼</button></span>
         <label class="aswitch"><input type="checkbox" class="aon"><i></i></label></div>
       <div class="abody" hidden>
@@ -355,38 +359,73 @@
       <div id="labMsg" class="hint"></div>
     </div>
   </div>
-  <label>Voice engine</label>
-  <select data-k="voiceEngine">
-    <option value="device">iPhone voice — unlimited and free (default); the online voices are the backup if it will not start</option>
-    <option value="auto">Online voices — Deepgram, then Cloudflare, then Gemini (iPhone voice as the last resort)</option>
-    <option value="dg">Deepgram voice first — fast, generous free credit (needs a free key)</option>
-    <option value="cf">Cloudflare voice first — free, but only ~7,000 characters a day</option>
-    <option value="gemini">Gemini voice first — natural, but only ~10 free lines a day</option>
-  </select>
-  <label class="chk"><input type="checkbox" data-k="deviceFallback"> When an online voice is first and all of them are used up, try the iPhone voice</label>
+  <h2 style="margin-top:16px">Voices</h2>
+  <div class="hint">Top voice speaks first. If it won't start, gets cut off, runs out or isn't set up, the next one carries on from where it stopped. ▲ ▼ to reorder, the switch to turn one off, tap a name for its settings.</div>
+  <div id="voiceBlocks" class="blocks">
+    <div class="ablock" data-who="device">
+      <div class="ahead2"><span class="anum"></span><button class="aname" type="button">iPhone voice<small class="asub">unlimited · free · instant</small><span class="akey"></span></button>
+        <span class="amove"><button type="button" class="aup" aria-label="Move up">▲</button><button type="button" class="adown" aria-label="Move down">▼</button></span>
+        <label class="aswitch"><input type="checkbox" class="aon"><i></i></label></div>
+      <div class="abody" hidden>
+        <label>Voice</label>
+        <select id="voiceSel" data-k="voiceURI"><option value="">System default</option></select>
+        <div class="row">
+          <div><label>Speed (0.5–1.5)</label><input type="number" data-k="rate" min="0.5" max="1.5" step="0.05"></div>
+          <div><label>Audio set-up (from the lab)</label>
+            <select data-k="deviceMode">
+              <option value="1">1 · background on, beeps on</option><option value="2">2 · background on, beeps asleep</option>
+              <option value="3">3 · background off, beeps on</option><option value="4">4 · background off, beeps asleep (default)</option>
+              <option value="5">5 · speech-prompt mode</option><option value="6">6 · normal audio mode</option><option value="7">7 · one sentence at a time</option>
+            </select></div>
+        </div>
+        <div class="hint">If iOS cuts it off part-way, the next voice finishes that answer, and the iPhone voice is back for the next card. Tip: the Enhanced / Premium voices (iPhone Settings → Accessibility → Spoken Content → Voices) sound much smoother; download one, then pick it here.</div>
+      </div>
+    </div>
+    <div class="ablock" data-who="dg">
+      <div class="ahead2"><span class="anum"></span><button class="aname" type="button">Deepgram<small class="asub">fast · natural · free credit</small><span class="akey"></span></button>
+        <span class="amove"><button type="button" class="aup" aria-label="Move up">▲</button><button type="button" class="adown" aria-label="Move down">▼</button></span>
+        <label class="aswitch"><input type="checkbox" class="aon"><i></i></label></div>
+      <div class="abody" hidden>
+        <label>Deepgram voice</label><input type="text" data-k="dgVoice" autocapitalize="off" autocorrect="off" placeholder="aura-2-thalia-en">
+        <div class="hint">Needs a <b>DEEPGRAM_API_KEY</b> secret in the Worker (README). Other voices: aura-2-andromeda-en, aura-2-apollo-en, aura-2-luna-en…</div>
+      </div>
+    </div>
+    <div class="ablock" data-who="cf">
+      <div class="ahead2"><span class="anum"></span><button class="aname" type="button">Cloudflare<small class="asub">free · ~7,000 characters a day</small><span class="akey"></span></button>
+        <span class="amove"><button type="button" class="aup" aria-label="Move up">▲</button><button type="button" class="adown" aria-label="Move down">▼</button></span>
+        <label class="aswitch"><input type="checkbox" class="aon"><i></i></label></div>
+      <div class="abody" hidden>
+        <div class="row">
+          <div><label>Voice model(s), comma-separated</label><input type="text" data-k="cfModel" autocapitalize="off" autocorrect="off"></div>
+          <div><label>Speaker (Aura models), e.g. luna</label><input type="text" data-k="cfVoice" autocapitalize="off" autocorrect="off"></div>
+        </div>
+        <div class="hint">Needs a Workers AI binding on the Worker. The free allowance resets at 00:00 UTC.</div>
+      </div>
+    </div>
+    <div class="ablock" data-who="gemini">
+      <div class="ahead2"><span class="anum"></span><button class="aname" type="button">Gemini voice<small class="asub">most natural · ~10 free lines a day</small><span class="akey"></span></button>
+        <span class="amove"><button type="button" class="aup" aria-label="Move up">▲</button><button type="button" class="adown" aria-label="Move down">▼</button></span>
+        <label class="aswitch"><input type="checkbox" class="aon"><i></i></label></div>
+      <div class="abody" hidden>
+        <div class="row">
+          <div><label>Speaker</label><select data-k="ttsVoice">
+            <option>Kore</option><option>Puck</option><option>Charon</option><option>Aoede</option><option>Fenrir</option><option>Leda</option><option>Orus</option><option>Zephyr</option></select></div>
+          <div><label>Voice model</label><input type="text" data-k="ttsModel" autocapitalize="off" autocorrect="off"></div>
+        </div>
+        <div class="hint">Uses your GEMINI_API_KEY. Its free limit is small, so it works best near the bottom as a last resort.</div>
+      </div>
+    </div>
+  </div>
+  <div class="hint" id="voiceSummary"></div>
+  <label class="chk"><input type="checkbox" data-k="mathSpeech"> Read maths, physics and units in words (“v₁ = 2.0 m/s” → “v 1 equals 2.0 meters per second”)</label>
   <label>Longest spoken reply for the small free voices (Cloudflare, Gemini), in characters (0 = no limit). Deepgram and the iPhone voice always read everything.</label>
   <input type="number" data-k="maxVoiceChars" min="0" max="5000" step="50">
   <label class="chk"><input type="checkbox" data-k="cacheClips"> Keep short lines (stall line, “Number 1”, “Ready”) on the phone so they are only ever made once</label>
   <div><button id="btnClearClips">Forget saved voice clips</button></div><div class="hint" id="clipInfo"></div>
-  <div class="row">
-    <div><label>Deepgram voice</label><input type="text" data-k="dgVoice" autocapitalize="off" autocorrect="off"></div>
-  </div>
-  <div class="row">
-    <div><label>Cloudflare voice model(s), comma-separated</label><input type="text" data-k="cfModel" autocapitalize="off" autocorrect="off"></div>
-    <div><label>Cloudflare speaker (Aura models), e.g. luna</label><input type="text" data-k="cfVoice" autocapitalize="off" autocorrect="off"></div>
-  </div>
-  <div class="row">
-    <div><label>Gemini voice</label><select data-k="ttsVoice">
-      <option>Kore</option><option>Puck</option><option>Charon</option><option>Aoede</option><option>Fenrir</option><option>Leda</option><option>Orus</option><option>Zephyr</option></select></div>
-    <div><label>Gemini voice model</label><input type="text" data-k="ttsModel" autocapitalize="off" autocorrect="off"></div>
-  </div>
   <label class="chk"><input type="checkbox" data-k="pauseLoopForSpeech"> Pause the background sound while speaking (recommended: stops the voice fading out)</label>
   <label>Audio mode</label>
   <select data-k="audioSessionMode"><option value="playback">Playback — ignore the silent switch (default)</option><option value="auto">Normal</option></select>
-  <label>iPhone voice</label>
-  <select id="voiceSel" data-k="voiceURI"><option value="">System default</option></select>
   <div class="row">
-    <div><label>Speech speed (0.5–1.5)</label><input type="number" data-k="rate" min="0.5" max="1.5" step="0.05"></div>
     <div><label>Tone volume (0–1)</label><input type="number" data-k="toneVol" min="0" max="1" step="0.05"></div>
   </div>
   <label class="chk"><input type="checkbox" data-k="speakQuestion"> Speak the question before the answer</label>
