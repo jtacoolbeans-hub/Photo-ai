@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.15.0';
+const APP_VERSION = '1.15.1';
 const MIN_WORKER_VERSION = 5;
 const RECOMMENDED_WORKER_VERSION = 9; // 9 = Groq reads the card first, Gemini as the fallback
 
@@ -467,6 +467,10 @@ function speakDeviceNow(text) {
         if (done || cur !== u || !started) return;
         // iOS can take the audio away ~1–3 s in and never say so: words stop arriving. Notice fast, stop it, hand the rest on.
         if (gotB && Date.now() - lastB > 2500 && (speechSynthesis.speaking || speechSynthesis.pending)) {
+          if (!/\s/.test(text.slice(spoke).trim())) { // it reached the last word and iOS just never said "done": that's finished, not dead
+            sev('voice reached the last word ' + short + ' — treating it as finished'); liveUtterances.delete(u);
+            try { speechSynthesis.cancel(); } catch {} finish(); return;
+          }
           died = true; sev('voice DIED after ' + spoke + ' of ' + text.length + ' characters — taking over'); liveUtterances.delete(u);
           try { speechSynthesis.cancel(); } catch {} finish(); return;
         }
@@ -611,7 +615,7 @@ async function playVoice(text, firstJob, more = false, ep = speechEpoch) {
         if (r.started) { // it spoke part of it, then iOS cut it off: the online voice carries on from there, not from the start
           const rest = text.slice(Math.max(0, r.spokenChars)).trim();
           errs.push('iPhone voice stopped part-way');
-          engineBackoff.device = Date.now() + 300000; sev('iPhone voice stopped after ' + r.spokenChars + ' characters — online voice continues; iPhone voice rests 5 min');
+          engineBackoff.device = Date.now() + 60000; sev('iPhone voice stopped after ' + r.spokenChars + ' characters — online voice continues; iPhone voice rests 1 min');
           if (!rest) return;
           text = rest; firstJob = null;
         } else {
@@ -882,7 +886,7 @@ function freshVideoElement() {
 
 async function startCamera(opts = {}) {
   if (camBusy) throw new Error('camera is busy');
-  camBusy = true;
+  camBusy = true; restartingSince = Date.now();
   try { await openCamera(opts); } finally { camBusy = false; }
 }
 async function openCamera(opts = {}) {
@@ -970,7 +974,7 @@ function showCamLost(on, err) {
   camNote = 'Camera disconnected — tap the orange panel or press any key'; setSub();
 }
 function unstick() { // a restart that has hung (iOS paused it while the app was away) must not block the next one
-  if ((restarting || camBusy) && Date.now() - restartingSince > 20000) { sev('camera restart was stuck — clearing it'); restarting = false; camBusy = false; }
+  if ((restarting || camBusy) && restartingSince && Date.now() - restartingSince > 20000) { sev('camera restart was stuck — clearing it'); restarting = false; camBusy = false; }
 }
 function gestureReconnect() { unstick(); if (camLost && running && !restarting && !camBusy) restartCamera('tap'); }
 document.addEventListener('click', gestureReconnect, true);
