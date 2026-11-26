@@ -95,7 +95,7 @@ if Groq is busy, fails or is slow. Until you add a Groq key, Gemini keeps answer
 and Gemini's **thinking**, **temperature** and **max answer tokens**. Reasoning is only accepted by reasoning
 models (Qwen 3 uses *none*/*default*, so low/medium/high are sent to it as *default*; GPT-OSS uses low/medium/high).
 A model that refuses it, like Llama 4 Scout, is asked again without it, so nothing fails. The model's thinking
-is never read out. Higher reasoning is smarter but slower, so raise **Seconds before the stall line** if answers
+is never read out. Higher reasoning is smarter but slower, so raise **Timeout & stall line → Speak the stall line after** if answers
 start arriving late. The model must be able to **see images**: a text-only model fails, and Gemini answers instead.
 
 ### Step 4: Turn on GitHub Pages
